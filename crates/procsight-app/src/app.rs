@@ -163,6 +163,8 @@ pub struct State {
     pub threads_req: Option<(ProcId, u64)>,
     /// D-40 で戻せなかった Debugger の値(E-45 の「もう一度」で書き戻す)。ログと設定には書かない(INV-7)
     pub replace_saved: Option<String>,
+    /// コマンド パレットとショートカットの一覧(v0.2.0)
+    pub palette: crate::palette::PaletteView,
 }
 
 impl State {
@@ -201,6 +203,7 @@ impl State {
             threads: HashMap::new(),
             threads_req: None,
             replace_saved: None,
+            palette: Default::default(),
         }
     }
 
@@ -593,8 +596,15 @@ impl State {
         self.now = ui.input(|i| i.time);
         let look = (self.cfg.theme, self.cfg.font_scale);
         if self.applied_look != Some(look) {
+            let first = self.applied_look.is_none();
             theme::apply(ui.ctx(), look.0, look.1);
             self.applied_look = Some(look);
+            // 文字の大きさは次のフレームから効く。最初のフレームで描くと、詳細パネルや浮いた窓の大きさが
+            // 拡大の前の値で決まってしまう(160% で詳細パネルが窓の半分を取る)ので、最初の 1 回だけ描かずに描き直す
+            if first && (look.1 - 1.0).abs() > f32::EPSILON {
+                ui.ctx().request_repaint();
+                return;
+            }
         }
         // 5 秒たった成功の帯を消す
         let now = self.now;
@@ -603,6 +613,7 @@ impl State {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
         }
         self.keyboard(ui);
+        crate::palette::consume_keys(self, ui);
         let pal = theme::palette(ui);
 
         egui::Panel::top("top").show(ui, |ui| self.top(ui, &pal));
@@ -619,6 +630,7 @@ impl State {
         settings::window(self, ui);
         crate::about::window(self, ui);
         locks::window(self, ui);
+        crate::palette::window(self, ui);
         dialogs::show(self, ui);
 
         let ms = t0.elapsed().as_secs_f32() * 1000.0;
@@ -630,6 +642,17 @@ impl State {
 
     fn keyboard(&mut self, ui: &mut Ui) {
         if self.dialog.is_some() {
+            return;
+        }
+        // コマンド パレット(Ctrl+K)とショートカットの一覧(F1)。開いている間の他のキーは palette.rs が受ける
+        if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
+            self.palette.open = !self.palette.open;
+            self.palette.query.clear();
+        }
+        if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F1)) {
+            self.palette.help_open = !self.palette.help_open;
+        }
+        if self.palette.open {
             return;
         }
         let tabs = [Key::Num1, Key::Num2, Key::Num3, Key::Num4];
@@ -676,6 +699,10 @@ impl State {
                     }
                 });
                 ui.menu_button("ツール", |ui| {
+                    if ui.add(egui::Button::new("コマンド パレット…").shortcut_text("Ctrl+K")).clicked() {
+                        self.palette.open = true;
+                        self.palette.query.clear();
+                    }
                     if ui.button("ファイルを掴んでいるプロセスを探す…").clicked() {
                         self.locks.open = true;
                     }
@@ -686,6 +713,9 @@ impl State {
                     }
                 });
                 ui.menu_button("ヘルプ", |ui| {
+                    if ui.add(egui::Button::new("キーボードのショートカット").shortcut_text("F1")).clicked() {
+                        self.palette.help_open = true;
+                    }
                     if ui.button("このソフトについて…").clicked() {
                         self.about_open = true;
                     }
@@ -704,17 +734,36 @@ impl State {
             });
         });
         ui.add_space(2.0);
+        // とても狭い窓(や大きな文字)では、更新間隔と一時停止をタブの下の段に下げて重ならないようにする
+        let two_rows = ui.available_width() < 640.0;
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
             for t in Tab::ALL {
-                let sel = self.tab == t;
-                let text = if sel { RichText::new(t.label()).strong() } else { RichText::new(t.label()) };
-                if ui.selectable_label(sel, text).clicked() {
+                let badge = self.tab_badge(t);
+                if crate::widgets::nav_tab(ui, pal, self.tab == t, t.label(), badge.as_deref()).clicked() {
                     self.tab = t;
                 }
             }
+            if !two_rows {
+                self.update_controls(ui, pal);
+            }
+        });
+        if two_rows {
+            ui.horizontal(|ui| self.update_controls(ui, pal));
+        }
+    }
+
+    /// 上の列の右: 更新間隔の選択と一時停止(再開)
+    fn update_controls(&mut self, ui: &mut Ui, pal: &Palette) {
+        {
+            ui.spacing_mut().item_spacing.x = 8.0;
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let label = if self.paused { "再開" } else { "一時停止" };
-                if ui.button(label).clicked() {
+                let clicked = if self.paused {
+                    ui.add(crate::widgets::primary_button(pal, "再開")).clicked()
+                } else {
+                    ui.button("一時停止").clicked()
+                };
+                if clicked {
                     self.set_paused(!self.paused);
                 }
                 let mut ms = self.cfg.interval_ms;
@@ -729,11 +778,26 @@ impl State {
                 if ms != self.cfg.interval_ms {
                     self.set_interval(ms);
                 }
-                let l = ui.label("更新:");
+                let l = ui.label(RichText::new("更新:").color(pal.weak));
                 combo.labelled_by(l.id);
             });
-        });
-        ui.add_space(2.0);
+        }
+    }
+
+    /// タブの右に小さく出す数(プロセス数・CPU・項目数)。まだ無ければ出さない
+    pub fn tab_badge(&self, t: Tab) -> Option<String> {
+        match t {
+            Tab::Processes => (self.snap.seq > 0).then(|| format::thousands(self.snap.totals.processes as u64)),
+            Tab::Performance => self.snap.perf.cpu_total.map(|v| format!("{v:.0}%")),
+            Tab::Startup => match &self.startup.items {
+                Load::Ready(v) => Some(v.len().to_string()),
+                _ => None,
+            },
+            Tab::Services => match &self.services.list {
+                Load::Ready(v) => Some(format::thousands(v.len() as u64)),
+                _ => None,
+            },
+        }
     }
 
     pub fn set_interval(&mut self, ms: u64) {
@@ -806,18 +870,41 @@ impl State {
             let t = &self.snap.totals;
             let p = &self.snap.perf;
             let mem = p.mem.as_ref().and_then(|m| m.used_pct()).map_or_else(|| format::DASH.to_string(), |v| format!("{v:.0}%"));
-            ui.label(format!("プロセス {}", format::thousands(t.processes as u64)));
-            ui.add_space(12.0);
-            ui.label(format!("スレッド {}", format::thousands(t.threads as u64)));
-            ui.add_space(12.0);
-            ui.label(format!("CPU {}", format::pct(p.cpu_total)));
-            ui.add_space(12.0);
-            ui.label(format!("メモリ {mem}"));
+            let gpu = p.gpus.as_ref().and_then(|g| g.iter().map(|g| g.util_pct).fold(None, |a: Option<f32>, v| Some(a.map_or(v, |a| a.max(v)))));
+            let pair = |ui: &mut Ui, name: &str, value: String| {
+                ui.label(RichText::new(name).color(pal.weak));
+                ui.label(value);
+                ui.add_space(10.0);
+            };
+            ui.spacing_mut().item_spacing.x = 4.0;
+            // 狭い窓や大きな文字では、スレッド・GPU・更新の間隔を省き、触れないの札を短くする(1 行に収める)
+            let wide = ui.available_width() >= 900.0;
+            pair(ui, "プロセス", format::thousands(t.processes as u64));
+            if wide {
+                pair(ui, "スレッド", format::thousands(t.threads as u64));
+            }
+            pair(ui, "CPU", format::pct(p.cpu_total));
+            pair(ui, "メモリ", mem);
+            if let (Some(g), true) = (gpu, wide) {
+                pair(ui, "GPU", format!("{g:.0}%"));
+            }
+            // 触れないプロセスが動いている間は、守っていることが見えるようにする
+            let touch_free = self.snap.rows.iter().filter(|r| r.state == ProcState::TouchFree && r.is_gone == 0).count();
+            if touch_free > 0 {
+                let text = if wide { format!("触れないプロセス {touch_free} 個が動作中") } else { format!("触れない {touch_free}") };
+                crate::widgets::pill(ui, text, pal.accent).on_hover_text("登録した exe のプロセスには、ProcSight からハンドルを開きません");
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if self.env.elevated {
                     ui.label(RichText::new("管理者").color(pal.accent));
                 } else {
                     ui.label(RichText::new("標準の権限").color(pal.weak));
+                }
+                ui.add_space(10.0);
+                if self.paused {
+                    crate::widgets::pill(ui, "更新を止めています", pal.warn);
+                } else if wide {
+                    ui.label(RichText::new(format!("{}ごとに更新", interval_label(self.cfg.interval_ms))).color(pal.weak));
                 }
             });
         });

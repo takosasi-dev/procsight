@@ -1,13 +1,15 @@
 //! S5 設定と S6 診断(画面設計書 §7.1〜§7.4)。変えたらすぐ反映して config.toml に書く(保存のボタンは無い。FR-48)。
 //! Ctrl+Shift+Esc の置き換え(FR-53・FR-56)は状態を Job で読み、オンは D9 を通す。
-//! 診断は ProcessGate の開いた回数・時間の記録・公開されていない API・フォント・置き換えの値を出す。
+//! 左はページの並び(選んでいる物に強調の色の縦の棒)、右は見出しの線で区切った項目。診断は S6。
 
 use eframe::egui;
 use crate::app::{Action, Band, BandButton, BandKey, BandKind, State};
 use crate::dialogs::Dialog;
-use crate::theme;
-use egui::{RichText, Ui};
-use procsight_core::config::{CloseAction, INTERVALS_MS, Theme, View};
+use crate::services_view::segmented;
+use crate::theme::{self, Palette, size, space};
+use crate::widgets;
+use egui::{Align2, CornerRadius, FontId, Rect, RichText, Sense, Ui, Vec2};
+use procsight_core::config::{CloseAction, Density, INTERVALS_MS, Theme, View};
 use procsight_core::format;
 use procsight_core::rules::{self, MAX_TOUCH_FREE};
 use procsight_core::taskmgr::{self, ReplaceStatus};
@@ -16,6 +18,8 @@ use procsight_win::jobs::{Job, OpError, ReplaceInfo};
 pub const REPLACE_TEXT: &str = "オンにすると、Windows のタスク マネージャーの代わりに ProcSight が開きます。Windows のタスク マネージャーは、プロセスのメニューの『Windows のタスク マネージャーを開く』から開けます。ProcSight が起動できなくなったときは、配布物の restore-taskmgr.reg をダブルクリックすると元に戻ります。";
 
 pub const TOUCH_FREE_TEXT: &str = "ここに登録した exe のプロセスには、ProcSight からハンドルを開きません。一覧には出しますが、詳細の取得と操作は行いません。ゲームのアンチチートに怪しまれないようにするための設定です。ただし、これで安全だと保証するものではありません。exe 名(例: game.exe)を 1 行に 1 つ入れてください。";
+
+pub const HEAT_MAP_TEXT: &str = "CPU やメモリの列の背景を、使っている量に合わせて塗ります";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SPage {
@@ -111,33 +115,83 @@ pub fn on_replace_changed(st: &mut State, enabled: bool, previous: String, r: Re
     st.job(Job::ReplaceStatus);
 }
 
+/// 左の並びの 1 項目。選んでいる物は薄い強調の地と、左の縦の棒
+fn nav_item(ui: &mut Ui, pal: &Palette, selected: bool, text: &str) -> egui::Response {
+    let h = (size::BODY + space::L * 1.5).round();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        if selected {
+            p.rect_filled(rect, CornerRadius::same(4), widgets::tint(pal.accent, 30));
+            let bar = Rect::from_min_size(rect.min + Vec2::new(0.0, space::S + 2.0), Vec2::new(3.0, h - (space::S + 2.0) * 2.0));
+            p.rect_filled(bar, CornerRadius::same(2), pal.accent);
+        } else if resp.hovered() {
+            p.rect_filled(rect, CornerRadius::same(4), ui.visuals().widgets.hovered.weak_bg_fill);
+        }
+        let color = if selected { ui.visuals().strong_text_color() } else { ui.visuals().text_color() };
+        p.text(egui::pos2(rect.left() + space::L, rect.center().y), Align2::LEFT_CENTER, text, FontId::proportional(size::BODY), color);
+    }
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, selected, text));
+    resp
+}
+
+/// 見出し(前に少し間を空ける)
+fn head(ui: &mut Ui, pal: &Palette, title: &str) {
+    ui.add_space(space::M);
+    widgets::section(ui, pal, title);
+}
+
+/// 弱い文字の説明(折り返す)
+fn desc(ui: &mut Ui, pal: &Palette, text: &str) {
+    ui.add(egui::Label::new(RichText::new(text).color(pal.weak)).wrap());
+}
+
 pub fn window(st: &mut State, ui: &mut Ui) {
     if !st.settings.open {
         return;
     }
+    let pal = theme::palette(ui);
     let mut open = true;
     let ctx = ui.ctx().clone();
-    egui::Window::new("設定").open(&mut open).default_size([720.0, 520.0]).min_size([680.0, 460.0]).collapsible(false).show(&ctx, |ui| {
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(150.0);
-                for p in SPage::ALL {
-                    if ui.selectable_label(st.settings.page == p, p.label()).clicked() {
-                        st.settings.page = p;
+    // 狭い窓・大きな文字でもはみ出さない大きさ(題の帯の分を引く)
+    let screen = ctx.content_rect();
+    let max = Vec2::new(screen.width() - 24.0, screen.height() - 64.0);
+    egui::Window::new("設定")
+        .open(&mut open)
+        .default_size(Vec2::new(720.0, 520.0).min(max))
+        .min_size(Vec2::new(680.0, 460.0).min(max))
+        .max_size(max)
+        .pivot(Align2::CENTER_CENTER)
+        .default_pos(screen.center())
+        .collapsible(false)
+        .show(&ctx, |ui| {
+            let nav_w = if ui.available_width() < 560.0 { 124.0 } else { 160.0 };
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(nav_w);
+                    ui.spacing_mut().item_spacing.y = space::XS;
+                    for p in SPage::ALL {
+                        if nav_item(ui, &pal, st.settings.page == p, p.label()).clicked() {
+                            st.settings.page = p;
+                        }
                     }
-                }
-            });
-            ui.separator();
-            ui.vertical(|ui| {
-                egui::ScrollArea::vertical().id_salt("settings_page").show(ui, |ui| match st.settings.page {
-                    SPage::General => general(st, ui),
-                    SPage::Look => look(st, ui),
-                    SPage::TouchFree => touch_free(st, ui),
-                    SPage::Diagnostics => diagnostics(st, ui),
+                });
+                ui.separator();
+                ui.vertical(|ui| {
+                    egui::ScrollArea::vertical().id_salt("settings_page").auto_shrink([false, false]).show(ui, |ui| {
+                        ui.add_space(space::XS);
+                        ui.label(RichText::new(st.settings.page.label()).size(size::TITLE).strong());
+                        match st.settings.page {
+                            SPage::General => general(st, ui),
+                            SPage::Look => look(st, ui),
+                            SPage::TouchFree => touch_free(st, ui),
+                            SPage::Diagnostics => diagnostics(st, ui),
+                        }
+                        ui.add_space(space::L);
+                    });
                 });
             });
         });
-    });
     if !open {
         st.settings.open = false;
     }
@@ -145,9 +199,9 @@ pub fn window(st: &mut State, ui: &mut Ui) {
 
 fn general(st: &mut State, ui: &mut Ui) {
     let pal = theme::palette(ui);
-    ui.label(RichText::new("更新間隔").strong());
+    head(ui, &pal, "更新間隔");
     let mut ms = st.cfg.interval_ms;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         for v in INTERVALS_MS {
             ui.radio_value(&mut ms, v, crate::app::interval_label(v));
         }
@@ -155,10 +209,9 @@ fn general(st: &mut State, ui: &mut Ui) {
     if ms != st.cfg.interval_ms {
         st.set_interval(ms);
     }
-    ui.add_space(8.0);
-    ui.label(RichText::new("ウィンドウを閉じたとき").strong());
+    head(ui, &pal, "ウィンドウを閉じたとき");
     let mut ca = st.cfg.effective_close_action();
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.radio_value(&mut ca, CloseAction::Exit, "終了する");
         let r = ui.add_enabled(st.cfg.tray_enabled, egui::RadioButton::new(ca == CloseAction::Tray, "トレイに残す"));
         if r.clicked() {
@@ -174,18 +227,17 @@ fn general(st: &mut State, ui: &mut Ui) {
         st.save_config();
         st.actions.push(Action::TrayChanged);
     }
-    ui.add_space(4.0);
+    head(ui, &pal, "起動");
     if ui.checkbox(&mut st.cfg.elevate_on_start, "起動時に管理者へ切り替える").changed() {
         st.save_config();
     }
-    ui.label(RichText::new("オンにすると、起動のたびに UAC の確認が出ます").color(pal.weak));
-    ui.add_space(12.0);
+    desc(ui, &pal, "オンにすると、起動のたびに UAC の確認が出ます");
     replace_section(st, ui);
 }
 
 fn replace_section(st: &mut State, ui: &mut Ui) {
     let pal = theme::palette(ui);
-    ui.label(RichText::new("Ctrl+Shift+Esc の置き換え").strong());
+    head(ui, &pal, "Ctrl+Shift+Esc の置き換え");
     let info = st.replace.clone();
     let on = st.cfg.taskmgr_replace.enabled;
     // 灰色の理由(D-39・FR-53)
@@ -198,7 +250,7 @@ fn replace_section(st: &mut State, ui: &mut Ui) {
     let r = ui.add_enabled(block.is_none() && info.is_some(), egui::Checkbox::new(&mut want, "Ctrl+Shift+Esc で ProcSight を開く"));
     if let Some(b) = block {
         r.on_disabled_hover_text(b.message());
-        ui.label(RichText::new(b.message()).color(pal.warn));
+        ui.add(egui::Label::new(RichText::new(b.message()).color(pal.warn)).wrap());
     }
     if want != on {
         if want {
@@ -211,27 +263,31 @@ fn replace_section(st: &mut State, ui: &mut Ui) {
             st.job(Job::ReplaceDisable { previous: st.cfg.taskmgr_replace.previous_debugger.clone() });
         }
     }
-    let status = match &info {
-        None => "読み込んでいます".to_string(),
+    let (status, color) = match &info {
+        None => ("読み込んでいます".to_string(), pal.weak),
         Some(i) => match taskmgr::status_of(i.debugger.as_deref(), &i.self_final_path) {
-            ReplaceStatus::OnSelf { target, .. } => format!("オン(登録先: {target})"),
-            _ if on => "外れています".into(),
-            ReplaceStatus::Off => "オフ".into(),
-            ReplaceStatus::Other(v) => format!("オフ(別の道具の登録: {v})"),
+            ReplaceStatus::OnSelf { target, .. } => (format!("オン(登録先: {target})"), pal.ok),
+            _ if on => ("外れています".into(), pal.warn),
+            ReplaceStatus::Off => ("オフ".into(), pal.weak),
+            ReplaceStatus::Other(v) => (format!("オフ(別の道具の登録: {v})"), pal.weak),
         },
     };
-    ui.label(format!("状態: {status}"));
+    ui.horizontal_wrapped(|ui| {
+        ui.label("状態:");
+        ui.label(RichText::new(status).color(color));
+    });
     if let Some(v) = info.as_ref().and_then(|i| i.debugger_wow64.clone()).filter(|v| !v.trim().is_empty()) {
-        ui.label(RichText::new(format!("32 ビット側にも登録があります: {v}(ProcSight は変えません)")).color(pal.weak));
+        desc(ui, &pal, &format!("32 ビット側にも登録があります: {v}(ProcSight は変えません)"));
     }
-    ui.add_space(4.0);
-    ui.label(RichText::new(REPLACE_TEXT).color(pal.weak));
+    ui.add_space(space::S);
+    desc(ui, &pal, REPLACE_TEXT);
 }
 
 fn look(st: &mut State, ui: &mut Ui) {
-    ui.label(RichText::new("テーマ").strong());
+    let pal = theme::palette(ui);
+    head(ui, &pal, "テーマ");
     let mut t = st.cfg.theme;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.radio_value(&mut t, Theme::Dark, "ダーク");
         ui.radio_value(&mut t, Theme::Light, "ライト");
         ui.radio_value(&mut t, Theme::System, "Windows に合わせる");
@@ -240,8 +296,7 @@ fn look(st: &mut State, ui: &mut Ui) {
         st.cfg.theme = t;
         st.save_config();
     }
-    ui.add_space(8.0);
-    ui.label(RichText::new("文字の大きさ").strong());
+    head(ui, &pal, "文字");
     let mut pct = (st.cfg.font_scale * 100.0).round() as i32;
     ui.add(egui::Slider::new(&mut pct, 80..=160).step_by(10.0).suffix("%").text("文字の大きさ"));
     let scale = pct as f32 / 100.0;
@@ -249,10 +304,9 @@ fn look(st: &mut State, ui: &mut Ui) {
         st.cfg.font_scale = scale;
         st.save_config();
     }
-    ui.add_space(8.0);
-    ui.label(RichText::new("一覧の表示").strong());
+    head(ui, &pal, "一覧の表示");
     let mut v = st.cfg.view;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.radio_value(&mut v, View::Tree, "ツリー");
         ui.radio_value(&mut v, View::Flat, "一覧");
     });
@@ -260,15 +314,32 @@ fn look(st: &mut State, ui: &mut Ui) {
         st.cfg.view = v;
         st.save_config();
     }
+    head(ui, &pal, "表");
+    let mut d = st.cfg.density;
+    ui.horizontal(|ui| {
+        ui.label("行の高さ");
+        let items: Vec<(Density, String)> = Density::ALL.iter().map(|&x| (x, x.label().to_string())).collect();
+        segmented(ui, &pal, &mut d, &items);
+    });
+    if d != st.cfg.density {
+        st.cfg.density = d;
+        st.save_config();
+    }
+    ui.add_space(space::S);
+    if ui.checkbox(&mut st.cfg.heat_map, "使用量で色を塗る").changed() {
+        st.save_config();
+    }
+    desc(ui, &pal, HEAT_MAP_TEXT);
 }
 
 fn touch_free(st: &mut State, ui: &mut Ui) {
     let pal = theme::palette(ui);
-    ui.label(TOUCH_FREE_TEXT);
-    ui.add_space(8.0);
+    ui.add_space(space::S);
+    ui.add(egui::Label::new(TOUCH_FREE_TEXT).wrap());
+    head(ui, &pal, "登録した exe");
     let mut changed = false;
-    ui.horizontal(|ui| {
-        let r = ui.add(egui::TextEdit::singleline(&mut st.settings.touch_input).hint_text("game.exe").desired_width(240.0));
+    ui.horizontal_wrapped(|ui| {
+        let r = ui.add(egui::TextEdit::singleline(&mut st.settings.touch_input).hint_text("game.exe").desired_width(220.0));
         let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         let full = st.cfg.touch_free.names.len() >= MAX_TOUCH_FREE;
         let add = ui.add_enabled(!full, egui::Button::new("追加")).on_disabled_hover_text("100 個までです");
@@ -292,23 +363,36 @@ fn touch_free(st: &mut State, ui: &mut Ui) {
             st.cfg.touch_free.names.remove(i);
             changed = true;
         }
+        ui.label(RichText::new(format!("{} / {MAX_TOUCH_FREE}", st.cfg.touch_free.names.len())).color(pal.weak).size(size::SMALL));
     });
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.set_min_height(140.0);
+    ui.add_space(space::S);
+    widgets::card(ui, &pal, |ui| {
+        ui.set_min_height(120.0);
         ui.set_width(ui.available_width());
         if st.cfg.touch_free.names.is_empty() {
-            ui.label(RichText::new("登録はありません").color(pal.weak));
+            ui.vertical_centered(|ui| {
+                ui.add_space(space::XL);
+                ui.label(RichText::new("登録はありません").color(pal.weak));
+            });
         }
-        for (i, n) in st.cfg.touch_free.names.iter().enumerate() {
-            if ui.selectable_label(st.settings.touch_selected == Some(i), n).clicked() {
-                st.settings.touch_selected = Some(i);
+        egui::ScrollArea::vertical().id_salt("touch_free_list").max_height(220.0).auto_shrink([false, true]).show(ui, |ui| {
+            for (i, n) in st.cfg.touch_free.names.iter().enumerate() {
+                if ui.selectable_label(st.settings.touch_selected == Some(i), n).clicked() {
+                    st.settings.touch_selected = Some(i);
+                }
             }
-        }
+        });
     });
+    ui.add_space(space::S);
     if ui.checkbox(&mut st.cfg.touch_free.include_descendants, "子孫も含める").changed() {
         changed = true;
     }
-    ui.label(format!("今動いている触れないプロセス: {} 個", st.snap.touch_free.len()));
+    let running = st.snap.touch_free.len();
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+        ui.painter().circle_filled(rect.center(), 3.5, if running > 0 { pal.accent } else { pal.weak });
+        ui.label(format!("今動いている触れないプロセス: {running} 個"));
+    });
     if changed {
         st.save_config();
         st.actions.push(Action::SetTouchFree(st.cfg.touch_free_set()));
@@ -334,7 +418,7 @@ fn stats_text(v: &[f32]) -> String {
 fn diagnostics(st: &mut State, ui: &mut Ui) {
     let pal = theme::palette(ui);
     let d = st.diag.clone();
-    ui.label(RichText::new("ProcessGate の記録").strong());
+    head(ui, &pal, "ProcessGate の記録");
     // 触れないプロセスの行を先頭に
     let mut rows: Vec<(u32, String, u32, bool)> = d
         .open_counts
@@ -351,26 +435,33 @@ fn diagnostics(st: &mut State, ui: &mut Ui) {
     }
     rows.sort_by_key(|r| (!r.3, std::cmp::Reverse(r.2), r.0));
     let touch_opens: u32 = rows.iter().filter(|r| r.3).map(|r| r.2).sum();
-    let c = if touch_opens > 0 { pal.danger } else { ui.visuals().text_color() };
-    ui.label(RichText::new(format!("触れないプロセスへの開いた回数: {touch_opens}")).color(c));
-    egui::ScrollArea::vertical().id_salt("gate").max_height(160.0).show(ui, |ui| {
-        egui::Grid::new("gate_grid").num_columns(4).striped(true).show(ui, |ui| {
-            for h in ["PID", "名前", "開いた回数", "触れない"] {
-                ui.strong(h);
-            }
-            ui.end_row();
-            for (pid, name, n, tf) in rows.iter().take(500) {
-                let color = if *tf && *n > 0 { pal.danger } else { ui.visuals().text_color() };
-                ui.label(RichText::new(pid.to_string()).color(color));
-                ui.label(RichText::new(name).color(color));
-                ui.label(RichText::new(n.to_string()).color(color));
-                ui.label(RichText::new(if *tf { "はい" } else { "" }).color(color));
+    let c = if touch_opens > 0 { pal.danger } else { pal.ok };
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+        ui.painter().circle_filled(rect.center(), 3.5, c);
+        ui.label(RichText::new(format!("触れないプロセスへの開いた回数: {touch_opens}")).color(if touch_opens > 0 { pal.danger } else { ui.visuals().text_color() }));
+    });
+    ui.add_space(space::S);
+    widgets::card(ui, &pal, |ui| {
+        ui.set_width(ui.available_width());
+        egui::ScrollArea::vertical().id_salt("gate").max_height(160.0).auto_shrink([false, true]).show(ui, |ui| {
+            egui::Grid::new("gate_grid").num_columns(4).striped(true).spacing([space::XL, space::S]).show(ui, |ui| {
+                for h in ["PID", "名前", "開いた回数", "触れない"] {
+                    ui.label(RichText::new(h).color(pal.weak).size(size::SMALL));
+                }
                 ui.end_row();
-            }
+                for (pid, name, n, tf) in rows.iter().take(500) {
+                    let color = if *tf && *n > 0 { pal.danger } else { ui.visuals().text_color() };
+                    ui.label(RichText::new(pid.to_string()).color(color));
+                    ui.label(RichText::new(name).color(color));
+                    ui.label(RichText::new(n.to_string()).color(color));
+                    ui.label(RichText::new(if *tf { "はい" } else { "" }).color(color));
+                    ui.end_row();
+                }
+            });
         });
     });
-    ui.add_space(10.0);
-    ui.label(RichText::new("時間の記録").strong());
+    head(ui, &pal, "時間の記録");
     let mut timing = d.timing;
     if ui.checkbox(&mut timing, "時間を記録する").changed() {
         st.actions.push(Action::SetTiming(timing));
@@ -380,11 +471,9 @@ fn diagnostics(st: &mut State, ui: &mut Ui) {
         ui.label(format!("取得の 1 周: {}", stats_text(&d.collect_ms)));
         ui.label(format!("1 フレーム: {}", stats_text(&st.frame_ms)));
     }
-    ui.add_space(10.0);
-    ui.label(RichText::new("公開されていない API").strong());
+    head(ui, &pal, "公開されていない API");
     let a = &d.api;
-    let yes = |b: bool| if b { "使える" } else { "使えない" };
-    egui::Grid::new("api").num_columns(2).show(ui, |ui| {
+    egui::Grid::new("api").num_columns(2).spacing([space::XL, space::S]).show(ui, |ui| {
         for (k, v) in [
             ("CPU 時間・開始時刻(事実19)", a.spi_times),
             ("プライベート作業セット(事実19)", a.spi_private_ws),
@@ -397,30 +486,29 @@ fn diagnostics(st: &mut State, ui: &mut Ui) {
             ("PDH の GPU", a.pdh_gpu),
         ] {
             ui.label(k);
-            ui.label(RichText::new(yes(v)).color(if v { ui.visuals().text_color() } else { pal.warn }));
+            widgets::dot_label(ui, if v { "使える" } else { "使えない" }, if v { pal.ok } else { pal.warn });
             ui.end_row();
         }
     });
-    ui.add_space(10.0);
-    ui.label(RichText::new("フォント").strong());
+    head(ui, &pal, "フォント");
     match &st.font {
-        Some(f) => ui.label(format!("{}(書体の番号 {}: {})", f.path, f.index, f.face)),
+        Some(f) => ui.add(egui::Label::new(format!("{}(書体の番号 {}: {})", f.path, f.index, f.face)).wrap()),
         None => ui.label(RichText::new("読めませんでした(Windows の補いだけで表示しています)").color(pal.warn)),
     };
-    ui.add_space(10.0);
-    ui.label(RichText::new("置き換え").strong());
+    head(ui, &pal, "置き換え");
     let (dbg, dbg32) = st.replace.as_ref().map_or((None, None), |i| (i.debugger.clone(), i.debugger_wow64.clone()));
-    egui::Grid::new("replace_diag").num_columns(2).show(ui, |ui| {
-        ui.label("Debugger(普段のビュー)");
+    egui::Grid::new("replace_diag").num_columns(2).spacing([space::XL, space::S]).show(ui, |ui| {
+        let k = |ui: &mut Ui, s: &str| ui.label(RichText::new(s).color(pal.weak));
+        k(ui, "Debugger(普段のビュー)");
         ui.label(dbg.unwrap_or_else(|| "(なし)".into()));
         ui.end_row();
-        ui.label("Debugger(WOW6432Node)");
+        k(ui, "Debugger(WOW6432Node)");
         ui.label(dbg32.unwrap_or_else(|| "(なし)".into()));
         ui.end_row();
-        ui.label("config.toml の enabled");
+        k(ui, "config.toml の enabled");
         ui.label(st.cfg.taskmgr_replace.enabled.to_string());
         ui.end_row();
-        ui.label("config.toml の previous_debugger");
+        k(ui, "config.toml の previous_debugger");
         ui.label(if st.cfg.taskmgr_replace.previous_debugger.is_empty() { "(空)".to_string() } else { st.cfg.taskmgr_replace.previous_debugger.clone() });
         ui.end_row();
     });

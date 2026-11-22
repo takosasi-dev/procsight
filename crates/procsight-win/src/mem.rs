@@ -18,6 +18,9 @@ pub fn sample() -> Option<MemSample> {
         available: m.ullAvailPhys,
         commit_total: p.CommitTotal as u64 * page,
         commit_limit: p.CommitLimit as u64 * page,
+        cached: p.SystemCache as u64 * page,
+        paged_pool: p.KernelPaged as u64 * page,
+        nonpaged_pool: p.KernelNonpaged as u64 * page,
     })
 }
 
@@ -28,5 +31,6 @@ mod tests {
         let m = super::sample().unwrap();
         assert!(m.total > m.available && m.available > 0);
         assert!(m.commit_limit >= m.commit_total && m.commit_total > 0);
+        assert!(m.cached > 0 && m.paged_pool > 0 && m.nonpaged_pool > 0);
     }
 }

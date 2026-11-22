@@ -26,6 +26,7 @@ pub fn env() -> EnvInfo {
         utc_offset_minutes: 9 * 60,
         self_final_path: "C:\\Users\\user\\Desktop\\ProcSight.exe".into(),
         cpu_name: Some("Example CPU 8-Core Processor".into()),
+        cpu_info: Some(procsight_win::CpuInfo { sockets: 1, cores: 4, logical: 8, l1: 256 * 1024, l2: 4 * 1024 * 1024, l3: 16 * 1024 * 1024 }),
     }
 }
 
@@ -186,6 +187,9 @@ fn finish(rows: Vec<ProcessRow>, seq: u64) -> Snapshot {
             available: 12 * gb + (wave(seq, 1.0, 50.0, 20.0) as u64) * gb / 100,
             commit_total: 21 * gb,
             commit_limit: 40 * gb,
+            cached: 9 * gb + gb / 3,
+            paged_pool: 820 * 1024 * 1024,
+            nonpaged_pool: 410 * 1024 * 1024,
         }),
         disks: Some(vec![
             DiskSample { name: "0 C:".into(), active_pct: wave(seq, 2.0, 6.0, 5.0), read_bps: wave(seq, 3.0, 20.0, 18.0) as f64 * 65_536.0, write_bps: wave(seq, 4.0, 10.0, 9.0) as f64 * 131_072.0 },

@@ -9,16 +9,27 @@ A process manager for Windows 11 that replaces the built-in Task Manager. It is 
 ## Features
 
 - **Processes**: tree and flat views, sorting, filtering by name, PID or path, configurable columns (shown, order, width; remembered), highlighting of started and exited rows
+  - CPU, memory, I/O and GPU cells shaded by usage, with machine totals in the column headers (can be turned off)
+  - Filter syntax: combine `cpu>5`, `mem>1gb`, `gpu>10`, `io>1mb`, `pid:1234`, `user:system`, `state:hung` and plain words
+  - System Idle Process always sorts to the bottom
+  - Row height (compact, normal, comfortable)
 - **Actions**: end process, end process tree, end several at once, priority (Idle to High), CPU affinity, efficiency mode, suspend and resume, bring to front, open file location, properties
 - **Details**: general (path, command line, parent, user, elevation, integrity level, architecture), threads, DLLs, handles, signature (verified without network access), small CPU and memory graphs
 - **Find what locks a file**: drop a file that "is in use" to see which processes hold it
 - **Performance**: CPU (total and per logical processor), memory, disks, network adapters and GPUs (last 60 samples)
+  - CPU topology (sockets, cores, logical processors, L1 to L3 cache) and memory breakdown (cached, paged pool, non-paged pool)
+  - Top 5 processes using the selected resource; click one to jump to it on the Processes tab
+- **Command palette** (Ctrl+K): find tabs, actions, processes and services by part of their name. **Keyboard shortcut list** with F1
 - **Startup**: enable or disable registry Run entries and startup folder items, recorded the same way Task Manager does, so both tools show the same state
 - **Services**: start, stop, restart and change the start type; running dependent services are listed before stopping
 - **Replace Task Manager** (off by default): open ProcSight with Ctrl+Shift+Esc and from the Ctrl+Alt+Del screen
-- Dark and light themes, font size, optional tray icon with CPU usage, keyboard shortcuts (Delete, Ctrl+F, Ctrl+1 to Ctrl+4, Ctrl+C)
+- Dark and light themes, font size, optional tray icon with CPU usage, keyboard shortcuts (Delete, Ctrl+F, Ctrl+1 to Ctrl+4, Ctrl+C, Ctrl+K, F1)
 
 ![CPU graphs](docs/images/s2-cpu-cores-dark.png)
+
+![Memory and top processes](docs/images/s2-memory-dark.png)
+
+![Command palette](docs/images/palette-note-dark.png)
 
 ## What ProcSight does not do
 
@@ -43,7 +54,7 @@ Register exe names (for example `game.exe`) under Settings → Touch-free proces
 
 ## Usage
 
-1. Download `procsight-v<version>-windows-x64.zip` from [Releases](https://github.com/takosasi-dev/procsight/releases) and extract it anywhere (v0.1.0 is a pre-release; see "Status" below).
+1. Download `procsight-v<version>-windows-x64.zip` from [Releases](https://github.com/takosasi-dev/procsight/releases) and extract it anywhere (current versions are pre-releases; see "Status" below).
 2. Run `ProcSight.exe`.
 
 Settings are stored in `%APPDATA%\ProcSight\config.toml` and logs in `%LOCALAPPDATA%\ProcSight\logs\` (7 days). Logs never contain command lines, full paths or user names.
@@ -99,7 +110,7 @@ UI tests render without creating a window (egui_kittest). `procsight-testee` is 
 
 ## Status
 
-v0.1.0 is a pre-release. The UI is verified with windowless rendering tests, but not yet by hands-on use. The automated tests (about 130) and checks with standard user rights pass. Administrator operations (services, all-users startup items, replacing Task Manager) and comparisons with Task Manager's numbers are still waiting for hands-on verification.
+v0.2.0 is a pre-release. The UI is verified with windowless rendering tests, but not yet by hands-on use. The automated tests (about 170) and checks with standard user rights pass. Administrator operations (services, all-users startup items, replacing Task Manager) and comparisons with Task Manager's numbers are still waiting for hands-on verification.
 
 ## License
 

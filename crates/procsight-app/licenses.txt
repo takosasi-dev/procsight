@@ -29,7 +29,6 @@ egui 0.37.0 — MIT License
 egui-wgpu 0.37.0 — MIT License
 egui-winit 0.37.0 — MIT License
 egui_extras 0.37.0 — MIT License
-egui_plot 0.38.0 — MIT License
 egui_system_font_provider 0.37.0 — MIT License
 either 1.19.0 — MIT License
 emath 0.37.0 — MIT License

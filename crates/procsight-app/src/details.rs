@@ -6,7 +6,8 @@ use eframe::egui;
 use crate::app::{Load, State};
 use crate::dialogs::Dialog;
 use crate::perf::sparkline;
-use crate::theme;
+use crate::theme::{self, size, space};
+use crate::widgets;
 use egui::{Align, Layout, RichText, Sense, Ui};
 use egui_extras::TableBuilder;
 use procsight_core::diff::{THREAD_STATE_WAITING, WAIT_REASON_SUSPENDED};
@@ -136,19 +137,27 @@ pub fn forget_general(st: &mut State, id: ProcId) {
     }
 }
 
+/// 取得中: くるくる回る印と「取得しています」を真ん中に
 fn loading(ui: &mut Ui) {
-    ui.horizontal(|ui| {
+    ui.add_space(space::XL);
+    ui.vertical_centered(|ui| {
         ui.add(egui::Spinner::new());
-        ui.label("取得しています");
+        ui.add_space(space::S);
+        ui.label(RichText::new("取得しています").color(theme::palette(ui).weak));
     });
 }
 
+/// 取れない: 「取得できません(理由)」。権限が理由なら「管理者で再起動」
 fn failed(st: &mut State, ui: &mut Ui, e: &OpError) {
     let pal = theme::palette(ui);
-    ui.horizontal(|ui| {
+    ui.add_space(space::XL);
+    ui.vertical_centered(|ui| {
         ui.label(RichText::new(format!("取得できません({})", e.message(st.env.elevated))).color(pal.danger));
-        if e.is_access_denied() && !st.env.elevated && ui.button("管理者で再起動").clicked() {
-            st.dialog = Some(Dialog::RestartElevated { opened: false });
+        if e.is_access_denied() && !st.env.elevated {
+            ui.add_space(space::M);
+            if ui.add(widgets::primary_button(&pal, "管理者で再起動")).clicked() {
+                st.dialog = Some(Dialog::RestartElevated { opened: false });
+            }
         }
     });
 }
@@ -167,20 +176,46 @@ pub fn ui(st: &mut State, ui: &mut Ui) {
         st.procs.detail.reset(id);
     }
     let row = id.and_then(|i| st.snap.find(i)).cloned();
+    ui.add_space(space::XS);
     ui.horizontal(|ui| {
-        match &row {
-            Some(r) => ui.label(RichText::new(format!("詳細: {}(PID {})", r.name, r.id.pid)).strong()),
-            None => ui.label(RichText::new("詳細").strong()),
-        };
-        ui.add_space(12.0);
-        for t in DTab::ALL {
-            if ui.selectable_label(st.procs.detail.tab == t, t.label()).clicked() {
-                st.procs.detail.tab = t;
-                st.procs.detail.collapsed = false;
+        ui.spacing_mut().item_spacing.x = space::M;
+        // 畳む・開くは右端に先に置き、左の見出しとタブは残りの幅に収める
+        let (label, tip) = if st.procs.detail.collapsed { ("∨ 開く", "詳細を開く") } else { ("∧ 畳む", "見出しの行だけにする") };
+        let right_w = 72.0;
+        let left_w = (ui.available_width() - right_w).max(0.0);
+        ui.allocate_ui_with_layout(egui::vec2(left_w, 30.0), Layout::left_to_right(Align::Center), |ui| {
+            ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+            match &row {
+                Some(r) => {
+                    crate::procs::row_icon(st, ui, r, &pal);
+                    // 長い名前でも札とタブを押し出さないよう、名前は札とタブの分を残した幅で切る
+                    let name_max = (ui.available_width() - 440.0).max(80.0);
+                    // 切るのは名前だけにし、PID は必ず出す
+                    ui.scope(|ui| {
+                        ui.set_max_width(name_max);
+                        let name = RichText::new(r.name.as_str()).size(size::BODY + 1.0).color(ui.visuals().strong_text_color());
+                        ui.add(egui::Label::new(name).selectable(false).truncate());
+                    });
+                    ui.add(egui::Label::new(RichText::new(format!("PID {}", r.id.pid)).size(size::SMALL + 1.0).color(pal.weak)).selectable(false));
+                    let state = if r.is_gone > 0 { ("終了", pal.danger) } else { (r.state.label(), crate::procs::state_color(&pal, r.state)) };
+                    // 実行中は弱い色だと札が沈むので、成功の色にする
+                    let color = if r.state == procsight_core::ProcState::Running && r.is_gone == 0 { pal.ok } else { state.1 };
+                    widgets::pill(ui, state.0, color);
+                }
+                None => {
+                    ui.label(RichText::new("詳細").strong());
+                }
             }
-        }
+            ui.add_space(space::M);
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for t in DTab::ALL {
+                if widgets::nav_tab(ui, &pal, st.procs.detail.tab == t, t.label(), None).clicked() {
+                    st.procs.detail.tab = t;
+                    st.procs.detail.collapsed = false;
+                }
+            }
+        });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let (label, tip) = if st.procs.detail.collapsed { ("∨ 開く", "詳細を開く") } else { ("∧ 畳む", "見出しの行だけにする") };
             if ui.button(label).on_hover_text(tip).clicked() {
                 st.procs.detail.collapsed = !st.procs.detail.collapsed;
             }
@@ -191,17 +226,20 @@ pub fn ui(st: &mut State, ui: &mut Ui) {
     }
     // 中身が少ないタブでもパネルの高さを保つ(ドラッグで変えた高さを、タブを替えても変えない)
     ui.set_min_height(ui.available_height());
-    ui.separator();
+    let sep = ui.available_rect_before_wrap();
+    ui.painter().hline(sep.x_range(), sep.top(), egui::Stroke::new(1.0, pal.border));
+    ui.add_space(space::M);
     let Some(r) = row else {
-        ui.label(RichText::new("行を選ぶと、ここに詳細が出ます").color(pal.weak));
+        widgets::empty_state(ui, &pal, "行を選ぶと、ここに詳細が出ます", None);
         return;
     };
     if r.touch_free {
-        ui.label(RichText::new("触れないプロセスのため、詳細は取得しません").color(pal.weak));
+        // §4.4: この文だけを出す
+        widgets::empty_state(ui, &pal, "触れないプロセスのため、詳細は取得しません", None);
         return;
     }
     if r.is_gone > 0 {
-        ui.label(RichText::new("すでに終了しています").color(pal.weak));
+        widgets::empty_state(ui, &pal, "すでに終了しています", None);
         return;
     }
     match st.procs.detail.tab {
@@ -239,9 +277,10 @@ fn general(st: &mut State, ui: &mut Ui, r: &procsight_core::ProcessRow) {
     };
     let el = st.env.elevated;
     let mut jump = None;
+    let row_h = st.cfg.density.row_h();
     ui.horizontal_top(|ui| {
-        let graph_w = 220.0;
-        let left_w = (ui.available_width() - graph_w - 12.0).max(200.0);
+        let graph_w = (ui.available_width() * 0.36).clamp(200.0, 440.0);
+        let left_w = (ui.available_width() - graph_w - space::XL).max(200.0);
         let h = ui.available_height();
         ui.allocate_ui_with_layout(egui::vec2(left_w, h), Layout::top_down(Align::Min), |ui| {
             ui.set_min_size(egui::vec2(left_w, h));
@@ -271,18 +310,21 @@ fn general(st: &mut State, ui: &mut Ui, r: &procsight_core::ProcessRow) {
                     rows.push(("効率モード", if e { "オン" } else { "オフ" }.into(), false));
                 }
                 rows.push(("セッション", r.session_id.to_string(), false));
-                // 項目・値・[コピー] の 3 列。値の列は残りの幅いっぱい
-                let key_w = 120.0;
+                // 項目(弱い文字)・値・[コピー] の 3 列。値の列は残りの幅いっぱい
+                let key_w = 116.0;
                 let btn_w = 64.0;
+                ui.spacing_mut().item_spacing.y = 0.0;
                 for (k, v, copy) in &rows {
                     ui.horizontal(|ui| {
-                        ui.allocate_ui_with_layout(egui::vec2(key_w, 18.0), Layout::left_to_right(Align::Center), |ui| {
+                        ui.set_min_height(row_h);
+                        ui.allocate_ui_with_layout(egui::vec2(key_w, row_h), Layout::left_to_right(Align::Center), |ui| {
                             ui.set_min_width(key_w);
                             ui.label(RichText::new(*k).color(pal.weak));
                         });
                         let val_w = (ui.available_width() - btn_w).max(80.0);
+                        let failed = v.starts_with("取得できません");
                         let resp = ui
-                            .allocate_ui_with_layout(egui::vec2(val_w, 18.0), Layout::left_to_right(Align::Center), |ui| {
+                            .allocate_ui_with_layout(egui::vec2(val_w, row_h), Layout::left_to_right(Align::Center), |ui| {
                                 ui.set_min_width(val_w);
                                 if *k == "親" && r.parent.is_some() {
                                     let l = ui.link(v);
@@ -291,31 +333,66 @@ fn general(st: &mut State, ui: &mut Ui, r: &procsight_core::ProcessRow) {
                                     }
                                     l
                                 } else {
-                                    ui.add(egui::Label::new(v.as_str()).truncate().sense(Sense::click()))
+                                    let color = if failed { pal.weak } else { ui.visuals().strong_text_color() };
+                                    ui.add(egui::Label::new(RichText::new(v.as_str()).color(color)).truncate().sense(Sense::click()))
                                 }
                             })
                             .inner;
                         copy_menu(&resp, v);
-                        if *copy && !v.starts_with("取得できません") && ui.small_button("コピー").clicked() {
+                        if *copy && !failed && ui.small_button("コピー").clicked() {
                             ui.ctx().copy_text(v.clone());
                         }
                     });
                 }
             });
         });
+        ui.add_space(space::M);
         ui.vertical(|ui| {
             let d = &st.procs.detail;
-            ui.label(RichText::new(format!("CPU {}", format::pct(d.cpu.last().copied()))).color(pal.weak));
-            sparkline(ui, d.cpu.iter().copied(), 100.0, egui::vec2(graph_w, 56.0), pal.graph);
-            ui.add_space(6.0);
-            let mem_max = d.mem.iter().copied().fold(1.0f32, f32::max) * 1.2;
-            ui.label(RichText::new(format!("メモリ {}", format::opt_bytes(d.mem.last().map(|v| *v as u64)))).color(pal.weak));
-            sparkline(ui, d.mem.iter().copied(), mem_max, egui::vec2(graph_w, 56.0), pal.graph2);
+            // 2 つのグラフで高さを分ける(見出しの行 2 つ・間・部品の間を引いた残り)。
+            // h を超えるとパネルが伸び、伸びた h でまたグラフが伸びるので、必ず h の内に収める
+            let sy = ui.spacing().item_spacing.y;
+            let gh = ((h - 2.0 * 26.0 - space::L - 4.0 * sy) / 2.0 - 1.0).floor().min(160.0);
+            let cpu_now = format::pct(d.cpu.last().copied());
+            let mem_now = format::opt_bytes(d.mem.last().map(|v| *v as u64));
+            if gh < 32.0 {
+                // パネルが低いときはグラフを省き、今の値だけ(パネルを押し広げて表を潰さない)
+                graph_title(ui, &pal, "CPU", &cpu_now, graph_w, pal.graph);
+                graph_title(ui, &pal, "メモリ", &mem_now, graph_w, pal.graph2);
+            } else {
+                graph(ui, &pal, "CPU", &cpu_now, d.cpu.iter().copied(), 100.0, egui::vec2(graph_w, gh), pal.graph);
+                ui.add_space(space::L);
+                let mem_max = d.mem.iter().copied().fold(1.0f32, f32::max) * 1.2;
+                graph(ui, &pal, "メモリ", &mem_now, d.mem.iter().copied(), mem_max, egui::vec2(graph_w, gh), pal.graph2);
+            }
         });
     });
     if let Some(p) = jump {
         st.procs.scroll_to = Some(p);
     }
+}
+
+/// スレッド・DLL・ハンドルの表。パネルの残りの高さで送り、幅いっぱいに広げる(行が多くてもパネルを押し広げない)。
+fn detail_table(ui: &mut Ui) -> TableBuilder<'_> {
+    let h = ui.available_height();
+    TableBuilder::new(ui).min_scrolled_height(0.0).max_scroll_height(h).auto_shrink([false, false])
+}
+
+/// グラフの見出しの行: 名前(弱い文字)と今の値(大きく、単位つき)
+fn graph_title(ui: &mut Ui, pal: &theme::Palette, name: &str, now: &str, w: f32, color: egui::Color32) {
+    ui.allocate_ui_with_layout(egui::vec2(w, 26.0), Layout::left_to_right(Align::Max), |ui| {
+        ui.label(RichText::new(name).color(pal.weak));
+        ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
+            ui.label(RichText::new(now).size(size::TITLE).color(color));
+        });
+    });
+}
+
+/// 全般の右のグラフ 1 つ(FR-37)
+#[allow(clippy::too_many_arguments)]
+fn graph(ui: &mut Ui, pal: &theme::Palette, name: &str, now: &str, values: impl Iterator<Item = f32>, max: f32, size_: egui::Vec2, color: egui::Color32) {
+    graph_title(ui, pal, name, now, size_.x, color);
+    sparkline(ui, values, max, size_, color);
 }
 
 /// D-20: 開始アドレスに DLL の名前を添える(DLL の一覧を取ってあれば)
@@ -329,7 +406,7 @@ fn address_text(modules: &Load<Vec<ModuleRow>>, addr: u64) -> String {
 }
 
 fn threads(st: &mut State, ui: &mut Ui, r: &procsight_core::ProcessRow) {
-    let pal = theme::palette(ui);
+    let row_h = st.cfg.density.row_h();
     // 更新ごとに SPI から取り直す(ハンドルを開かない。D-20)
     let want = (r.id, st.snap.seq);
     if st.threads_req != Some(want) {
@@ -337,11 +414,11 @@ fn threads(st: &mut State, ui: &mut Ui, r: &procsight_core::ProcessRow) {
         st.job(Job::Threads { id: r.id });
     }
     let Some(list) = st.threads.get(&r.id) else {
-        ui.label(RichText::new(format!("スレッド {} 本。取得しています", format::thousands(r.threads as u64))).color(pal.weak));
+        loading(ui);
         return;
     };
     let modules = &st.procs.detail.modules;
-    TableBuilder::new(ui)
+    detail_table(ui)
         .id_salt("threads")
         .striped(true)
         .resizable(true)
@@ -352,7 +429,7 @@ fn threads(st: &mut State, ui: &mut Ui, r: &procsight_core::ProcessRow) {
         .column(egui_extras::Column::initial(70.0))
         .column(egui_extras::Column::initial(90.0))
         .column(egui_extras::Column::remainder())
-        .header(20.0, |mut h| {
+        .header(row_h + 4.0, |mut h| {
             for t in ["スレッド ID", "状態", "待ちの理由", "優先度", "CPU 時間", "開始アドレス"] {
                 h.col(|ui| {
                     ui.strong(t);
@@ -360,7 +437,7 @@ fn threads(st: &mut State, ui: &mut Ui, r: &procsight_core::ProcessRow) {
             }
         })
         .body(|body| {
-            body.rows(18.0, list.len(), |mut row| {
+            body.rows(row_h, list.len(), |mut row| {
                 let t = &list[row.index()];
                 // §8.1 の表が無いので、core で確かめると決めた値だけ言葉にし、他は数字のまま(FR-31)
                 let state = if t.state == THREAD_STATE_WAITING { "待ち".to_string() } else { t.state.to_string() };
@@ -386,6 +463,7 @@ fn threads(st: &mut State, ui: &mut Ui, r: &procsight_core::ProcessRow) {
 }
 
 fn modules(st: &mut State, ui: &mut Ui, id: ProcId) {
+    let row_h = st.cfg.density.row_h();
     if st.procs.detail.modules.is_not_asked() {
         st.procs.detail.modules = Load::Loading;
         st.job(Job::Modules { id });
@@ -417,14 +495,14 @@ fn modules(st: &mut State, ui: &mut Ui, id: ProcId) {
         }
     };
     if list.is_empty() {
-        ui.label("ありません");
+        widgets::empty_state(ui, &theme::palette(ui), "ありません", None);
         return;
     }
     let q = st.procs.detail.module_filter.trim().to_lowercase();
     let idx: Vec<usize> = (0..list.len())
         .filter(|&i| q.is_empty() || list[i].name.to_lowercase().contains(&q) || list[i].path.to_lowercase().contains(&q))
         .collect();
-    TableBuilder::new(ui)
+    detail_table(ui)
         .id_salt("modules")
         .striped(true)
         .resizable(true)
@@ -434,7 +512,7 @@ fn modules(st: &mut State, ui: &mut Ui, id: ProcId) {
         .column(egui_extras::Column::initial(360.0).clip(true))
         .column(egui_extras::Column::initial(150.0))
         .column(egui_extras::Column::remainder())
-        .header(20.0, |mut h| {
+        .header(row_h + 4.0, |mut h| {
             for t in ["名前", "パス", "ベースアドレス", "サイズ"] {
                 h.col(|ui| {
                     ui.strong(t);
@@ -442,7 +520,7 @@ fn modules(st: &mut State, ui: &mut Ui, id: ProcId) {
             }
         })
         .body(|body| {
-            body.rows(18.0, idx.len(), |mut row| {
+            body.rows(row_h, idx.len(), |mut row| {
                 let m = &list[idx[row.index()]];
                 let cells = [m.name.clone(), m.path.clone(), format!("0x{:016X}", m.base), format::bytes(m.size as u64)];
                 for c in &cells {
@@ -468,6 +546,7 @@ fn handle_name(n: &HandleName) -> String {
 }
 
 fn handles(st: &mut State, ui: &mut Ui, id: ProcId) {
+    let row_h = st.cfg.density.row_h();
     if st.procs.detail.handles.is_not_asked() {
         st.procs.detail.handles = Load::Loading;
         st.job(Job::Handles { id });
@@ -485,7 +564,7 @@ fn handles(st: &mut State, ui: &mut Ui, id: ProcId) {
         }
     };
     let Ok(t) = table.lock() else {
-        ui.label("取得できません");
+        widgets::empty_state(ui, &theme::palette(ui), "取得できません", None);
         return;
     };
     if !t.finished {
@@ -531,9 +610,9 @@ fn handles(st: &mut State, ui: &mut Ui, id: ProcId) {
     });
     let idx = &view.idx;
     if t.rows.is_empty() {
-        ui.label("ありません");
+        widgets::empty_state(ui, &theme::palette(ui), "ありません", None);
     } else {
-        TableBuilder::new(ui)
+        detail_table(ui)
             .id_salt("handles")
             .striped(true)
             .resizable(true)
@@ -543,7 +622,7 @@ fn handles(st: &mut State, ui: &mut Ui, id: ProcId) {
             .column(egui_extras::Column::initial(140.0))
             .column(egui_extras::Column::initial(420.0).clip(true))
             .column(egui_extras::Column::remainder())
-            .header(20.0, |mut h| {
+            .header(row_h + 4.0, |mut h| {
                 for s in ["値", "種類", "名前", "アクセス"] {
                     h.col(|ui| {
                         ui.strong(s);
@@ -551,7 +630,7 @@ fn handles(st: &mut State, ui: &mut Ui, id: ProcId) {
                 }
             })
             .body(|body| {
-                body.rows(18.0, idx.len(), |mut row| {
+                body.rows(row_h, idx.len(), |mut row| {
                     let h = &t.rows[idx[row.index()]];
                     let cells = [format!("0x{:X}", h.value), h.type_name.clone(), handle_name(&h.name), format!("0x{:08X}", h.access)];
                     for c in &cells {
@@ -574,7 +653,7 @@ fn handles(st: &mut State, ui: &mut Ui, id: ProcId) {
 fn signature(st: &mut State, ui: &mut Ui, r: &procsight_core::ProcessRow) {
     let pal = theme::palette(ui);
     let Some(path) = r.path().map(str::to_string) else {
-        ui.label(RichText::new("パスを取得できていないため、確かめられません").color(pal.weak));
+        widgets::empty_state(ui, &pal, "パスを取得できていないため、確かめられません", None);
         return;
     };
     if !st.sigs.contains_key(&path) {

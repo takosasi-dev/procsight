@@ -143,6 +143,71 @@ pub fn processor_groups() -> u16 {
     unsafe { windows::Win32::System::Threading::GetActiveProcessorGroupCount() }
 }
 
+/// CPU の作り(GetLogicalProcessorInformationEx の RelationAll。読むだけ、プロセスは開かない)。
+/// ソケットはパッケージの数、コアはコアの数、論理プロセッサはコアのグループのマスクのビットの合計、L1〜L3 はレベルごとの大きさの合計
+pub fn cpu_info() -> Option<crate::CpuInfo> {
+    use windows::Win32::System::SystemInformation::{
+        GetLogicalProcessorInformationEx, GROUP_AFFINITY, RelationAll, RelationCache, RelationProcessorCore,
+        RelationProcessorPackage, SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
+    };
+    let mut len = 0u32;
+    // SAFETY: バッファ無しで必要な長さだけを聞く(ERROR_INSUFFICIENT_BUFFER で失敗するのが正しい)
+    let _ = unsafe { GetLogicalProcessorInformationEx(RelationAll, None, &mut len) };
+    if len == 0 {
+        return None;
+    }
+    // 8 バイト境界にそろえるため u64 で取る。項目の頭を構造体の大きさで読んでもはみ出さないよう、後ろに 1 つ分の余白を足す
+    let pad = std::mem::size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>().div_ceil(8);
+    let mut buf = vec![0u64; (len as usize).div_ceil(8) + pad];
+    // SAFETY: buf は len バイト以上あり、呼び出しの間生きている
+    unsafe { GetLogicalProcessorInformationEx(RelationAll, Some(buf.as_mut_ptr().cast()), &mut len) }.ok()?;
+    let base = buf.as_ptr().cast::<u8>();
+    let total = (len as usize).min((buf.len() - pad) * 8);
+    let mut info = crate::CpuInfo::default();
+    let mut off = 0usize;
+    let head = std::mem::offset_of!(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, Anonymous);
+    while off + head <= total {
+        // SAFETY: off + head <= total で、後ろに構造体 1 つ分の余白があるので、構造体の大きさで読んでも確保の中。揃っていない場合に備えて read_unaligned で読む
+        let e = unsafe { base.add(off).cast::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>().read_unaligned() };
+        let size = e.Size as usize;
+        if size < head || off + size > total {
+            break;
+        }
+        match e.Relationship {
+            r if r == RelationProcessorPackage => info.sockets += 1,
+            r if r == RelationProcessorCore => {
+                info.cores += 1;
+                // SAFETY: Relationship が Core なので Processor の形。読むのは size の中だけ
+                let p = unsafe { e.Anonymous.Processor };
+                let masks = head + std::mem::offset_of!(windows::Win32::System::SystemInformation::PROCESSOR_RELATIONSHIP, GroupMask);
+                for g in 0..p.GroupCount as usize {
+                    let at = masks + g * std::mem::size_of::<GROUP_AFFINITY>();
+                    if at + std::mem::size_of::<GROUP_AFFINITY>() > size {
+                        break;
+                    }
+                    // SAFETY: at + GROUP_AFFINITY の大きさ <= size なので、この項目の中
+                    let ga = unsafe { base.add(off + at).cast::<GROUP_AFFINITY>().read_unaligned() };
+                    info.logical += ga.Mask.count_ones();
+                }
+            }
+            r if r == RelationCache => {
+                // SAFETY: Relationship が Cache なので Cache の形
+                let c = unsafe { e.Anonymous.Cache };
+                let bytes = c.CacheSize as u64;
+                match c.Level {
+                    1 => info.l1 += bytes,
+                    2 => info.l2 += bytes,
+                    3 => info.l3 += bytes,
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        off += size;
+    }
+    (info.cores > 0).then_some(info)
+}
+
 /// CPU の名前(HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0 の ProcessorNameString。読むだけ)
 pub fn cpu_name() -> Option<String> {
     use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
@@ -190,5 +255,17 @@ mod tests {
         assert!(cpu_name().is_some());
         assert!(program_files().to_lowercase().ends_with("program files"), "{}", program_files());
         assert!(system_root().to_lowercase().ends_with("windows"));
+    }
+
+    #[test]
+    fn cpu_info_reads_this_pc() {
+        let c = cpu_info().expect("GetLogicalProcessorInformationEx が読めない");
+        eprintln!("{c:?}");
+        assert!(c.sockets >= 1, "{c:?}");
+        assert!(c.cores >= 1 && c.cores >= c.sockets, "{c:?}");
+        assert!(c.logical >= c.cores, "{c:?}");
+        assert_eq!(c.logical, logical_cpus(), "{c:?}");
+        // L3 は無い CPU もあるので見ない
+        assert!(c.l1 > 0 && c.l2 > 0, "{c:?}");
     }
 }

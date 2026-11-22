@@ -52,6 +52,20 @@ pub struct EnvInfo {
     pub self_final_path: String,
     /// パフォーマンスの CPU のページの見出し
     pub cpu_name: Option<String>,
+    /// CPU の作り(コア・ソケット・キャッシュ)。取れなければ None(v0.2.0)
+    pub cpu_info: Option<CpuInfo>,
+}
+
+/// GetLogicalProcessorInformationEx から読む CPU の作り。クロックは読まない(非スコープ。RigSight の担当)
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CpuInfo {
+    pub sockets: u32,
+    pub cores: u32,
+    pub logical: u32,
+    /// キャッシュの合計(バイト)。0 は無い・取れない
+    pub l1: u64,
+    pub l2: u64,
+    pub l3: u64,
 }
 
 pub fn env_info() -> EnvInfo {
@@ -66,5 +80,6 @@ pub fn env_info() -> EnvInfo {
         utc_offset_minutes: util::local_offset_minutes(),
         self_final_path: elevation::self_final_path(),
         cpu_name: util::cpu_name(),
+        cpu_info: util::cpu_info(),
     }
 }

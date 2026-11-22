@@ -5,12 +5,12 @@
 use eframe::egui;
 use crate::app::{IconSlot, State};
 use crate::dialogs::Dialog;
-use crate::theme::{self, Palette};
-use crate::{details, log};
-use egui::{Align, Color32, Key, Layout, Modifiers, RichText, Sense, Ui, Vec2};
+use crate::theme::{self, Palette, size, space};
+use crate::{details, log, widgets};
+use egui::{Align, Align2, Color32, FontId, Key, Layout, Modifiers, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use egui_extras::TableBuilder;
 use procsight_core::config::{Config, View};
-use procsight_core::filter::{self, Scope, SortValue};
+use procsight_core::filter::{self, Query, Scope, SortValue};
 use procsight_core::format;
 use procsight_core::rules;
 use procsight_core::tree::{self, Forest, VisibleRow};
@@ -18,7 +18,66 @@ use procsight_core::{Column, Priority, ProcId, ProcState, ProcessRow, Snapshot};
 use procsight_win::jobs::{Job, Target};
 use std::collections::HashSet;
 
-pub const ROW_H: f32 = 20.0;
+/// 見出しの高さ(上に全体の値、下に列の名前の 2 段)
+const HEADER_H: f32 = 42.0;
+
+/// 見出しの上の段に出す全体の値(Snapshot が変わったときだけ作る)
+#[derive(Default)]
+struct HeaderTotals {
+    seq: u64,
+    cpu: Option<f32>,
+    mem: Option<f32>,
+    gpu: Option<f32>,
+    io_read: Option<f64>,
+    io_write: Option<f64>,
+}
+
+impl HeaderTotals {
+    fn of(snap: &Snapshot) -> HeaderTotals {
+        let sum = |f: fn(&ProcessRow) -> Option<f64>| {
+            let mut any = false;
+            let s: f64 = snap.rows.iter().filter_map(f).inspect(|_| any = true).sum();
+            any.then_some(s)
+        };
+        HeaderTotals {
+            seq: snap.seq,
+            cpu: snap.perf.cpu_total,
+            mem: snap.perf.mem.as_ref().and_then(|m| m.used_pct()),
+            gpu: snap.perf.gpus.as_ref().and_then(|g| g.iter().map(|x| x.util_pct).reduce(f32::max)),
+            io_read: sum(|r| r.io_read_bps),
+            io_write: sum(|r| r.io_write_bps),
+        }
+    }
+
+    /// (上の段の文字, 塗りの割合)
+    fn of_column(&self, c: Column) -> Option<(String, f32)> {
+        let pct = |v: f32| (format!("{v:.0}%"), v / 100.0);
+        match c {
+            Column::Cpu => self.cpu.map(pct),
+            Column::Mem => self.mem.map(pct),
+            Column::Gpu => self.gpu.map(pct),
+            Column::IoRead => self.io_read.map(|v| (format::speed(Some(v)), 0.0)),
+            Column::IoWrite => self.io_write.map(|v| (format::speed(Some(v)), 0.0)),
+            _ => None,
+        }
+    }
+}
+
+/// 使用量の塗りの割合(0〜1)。CPU と GPU は平方根で小さな値も見えるように、メモリは物理メモリの 20% で最大、
+/// I/O は 16 KB/s〜50 MB/s の対数(常に少し読み書きしている行まで塗らない)
+fn heat_frac(mem_total: Option<u64>, r: &ProcessRow, c: Column) -> Option<f32> {
+    const IO_LO: f64 = 16.0 * 1024.0;
+    const IO_HI: f64 = 50.0 * 1024.0 * 1024.0;
+    let io = |b: Option<f64>| b.map(|b| ((b / IO_LO).max(1.0).log10() / (IO_HI / IO_LO).log10()) as f32);
+    match c {
+        Column::Cpu => r.cpu_pct.map(|v| (v / 100.0).max(0.0).sqrt()),
+        Column::Gpu => r.gpu_pct.map(|v| (v / 100.0).max(0.0).sqrt()),
+        Column::Mem => r.mem.zip(mem_total.filter(|t| *t > 0)).map(|(m, t)| m as f32 / t as f32 * 5.0),
+        Column::IoRead => io(r.io_read_bps),
+        Column::IoWrite => io(r.io_write_bps),
+        _ => None,
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 struct ListKey {
@@ -45,11 +104,16 @@ pub struct ProcsView {
     /// FR-44・S8 から: この行を選んで見える位置まで動かす
     pub scroll_to: Option<ProcId>,
     pub detail: details::DetailState,
+    /// 解析した絞り込み(元の文字と対。文字が変わったときだけ解析し直す)
+    query: (String, Query),
+    totals: HeaderTotals,
 }
 
 impl ProcsView {
     pub fn new(_cfg: &Config) -> ProcsView {
         ProcsView {
+            query: Default::default(),
+            totals: HeaderTotals::default(),
             filter: String::new(),
             scope: Scope::All,
             focus_filter: false,
@@ -158,14 +222,24 @@ fn refresh(st: &mut State) {
     if st.procs.key.as_ref() == Some(&key) {
         return;
     }
+    if st.procs.query.0 != key.filter {
+        st.procs.query = (key.filter.clone(), Query::parse(&key.filter));
+    }
+    if st.procs.totals.seq != st.snap.seq {
+        st.procs.totals = HeaderTotals::of(&st.snap);
+    }
     let snap = st.snap.clone();
     let rows = &snap.rows;
     let me = st.env.user.clone();
-    let (q, scope, col, desc) = (key.filter.clone(), key.scope, key.col, key.desc);
+    let (scope, col, desc) = (key.scope, key.col, key.desc);
     let st_ro: &State = st;
-    let m = |r: &ProcessRow| filter::matches(r, &q, scope, me.as_deref());
+    let q = &st_ro.procs.query.1;
+    let m = |r: &ProcessRow| filter::in_scope(r, scope, me.as_deref()) && q.matches(r);
+    // System Idle Process(PID 0)は、どの列・どちら向きでも一番下(CPU の降順で上に居座るため)
     let cmp = |a: &ProcessRow, b: &ProcessRow| {
-        filter::compare_values(&sort_value(st_ro, a, col), &sort_value(st_ro, b, col), desc, a.id.pid, b.id.pid)
+        (a.id.pid == 0).cmp(&(b.id.pid == 0)).then_with(|| {
+            filter::compare_values(&sort_value(st_ro, a, col), &sort_value(st_ro, b, col), desc, a.id.pid, b.id.pid)
+        })
     };
     let (forest, visible) = if key.tree {
         let f = tree::build(rows);
@@ -439,19 +513,72 @@ fn run_cmd(st: &mut State, ui: &Ui, cmd: Cmd) {
     }
 }
 
+/// 「?」の印。マウスを置くと絞り込みの書き方の一覧を出す。
+fn query_help(ui: &mut Ui, pal: &Palette) {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+    let color = if resp.hovered() { pal.accent } else { pal.weak };
+    ui.painter().circle_stroke(rect.center(), 8.0, Stroke::new(1.2, color));
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, "?", FontId::proportional(size::SMALL), color);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, "絞り込みの書き方"));
+    resp.on_hover_ui(|ui| {
+        ui.set_max_width(440.0);
+        ui.label(RichText::new("絞り込みの書き方").strong());
+        ui.label(RichText::new("空白で区切った語を全部満たす行を残します").color(pal.weak).size(size::SMALL));
+        ui.add_space(space::S);
+        egui::Grid::new("query_help").num_columns(2).spacing([space::L, space::S]).show(ui, |ui| {
+            for (k, v) in filter::QUERY_HELP {
+                ui.label(RichText::new(k).monospace().color(pal.accent));
+                ui.label(v);
+                ui.end_row();
+            }
+        });
+    });
+}
+
+/// ツリーと一覧の 2 つの切り替え(枠の中に並べる)。
+fn view_switch(st: &mut State, ui: &mut Ui, pal: &Palette) {
+    let mut view = st.cfg.view;
+    egui::Frame::new()
+        .fill(pal.surface)
+        .stroke(Stroke::new(1.0, pal.border))
+        .corner_radius(6)
+        .inner_margin(2)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = space::XS;
+            for (v, label) in [(View::Tree, "ツリー"), (View::Flat, "一覧")] {
+                let on = view == v;
+                let fg = if on { ui.visuals().strong_text_color() } else { pal.weak };
+                let b = egui::Button::new(RichText::new(label).color(fg))
+                    .fill(if on { pal.selected } else { Color32::TRANSPARENT })
+                    .stroke(Stroke::NONE)
+                    .corner_radius(4)
+                    .min_size(egui::vec2(52.0, 22.0))
+                    .selected(on);
+                if ui.add(b).clicked() {
+                    view = v;
+                }
+            }
+        });
+    if view != st.cfg.view {
+        st.cfg.view = view;
+        st.save_config();
+    }
+}
+
 fn toolbar(st: &mut State, ui: &mut Ui) {
+    let pal = theme::palette(ui);
+    ui.add_space(space::S);
     ui.horizontal(|ui| {
-        let edit = egui::TextEdit::singleline(&mut st.procs.filter)
-            .hint_text("名前・PID・パスで絞り込み(Ctrl+F)")
-            .desired_width(280.0);
-        let resp = ui.add(edit);
+        ui.spacing_mut().item_spacing.x = space::M;
+        ui.spacing_mut().interact_size.y = 26.0;
+        let w = (ui.available_width() * 0.34).clamp(180.0, 380.0);
+        let resp = widgets::search_box(ui, &pal, &mut st.procs.filter, "名前・PID・パスで絞り込み(Ctrl+F)", w);
         if std::mem::take(&mut st.procs.focus_filter) {
             resp.request_focus();
         }
-        if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
-            st.procs.filter.clear();
-        }
-        let l = ui.label("範囲");
+        query_help(ui, &pal);
+        ui.add_space(space::S);
+        let l = ui.label(RichText::new("範囲").color(pal.weak));
         egui::ComboBox::from_id_salt("scope")
             .selected_text(st.procs.scope.label())
             .show_ui(ui, |ui| {
@@ -461,17 +588,10 @@ fn toolbar(st: &mut State, ui: &mut Ui) {
             })
             .response
             .labelled_by(l.id);
-        ui.add_space(8.0);
-        let mut view = st.cfg.view;
-        ui.selectable_value(&mut view, View::Tree, "ツリー");
-        ui.selectable_value(&mut view, View::Flat, "一覧");
-        if view != st.cfg.view {
-            st.cfg.view = view;
-            st.save_config();
-        }
-        ui.add_space(8.0);
+        view_switch(st, ui, &pal);
         ui.menu_button("列…", |ui| columns_menu(st, ui));
     });
+    ui.add_space(space::S);
 }
 
 /// FR-3: 表示・順序。名前の列は外せない
@@ -535,6 +655,95 @@ fn default_icon(ui: &mut Ui, pal: &Palette) {
     ui.painter().line_segment([r.left_top() + egui::vec2(0.0, 3.5), r.right_top() + egui::vec2(0.0, 3.5)], egui::Stroke::new(1.0, pal.weak));
 }
 
+/// 行のアイコン(届いていれば exe のアイコン、無ければ既定の印)。詳細パネルの見出しでも使う
+pub fn row_icon(st: &State, ui: &mut Ui, r: &ProcessRow, pal: &Palette) {
+    match r.path().and_then(|p| st.icons.get(p)) {
+        Some(IconSlot::Tex(t)) => {
+            ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(t.id(), Vec2::splat(16.0))));
+        }
+        _ => default_icon(ui, pal),
+    }
+}
+
+/// 状態のセル: 色の点と文字。触れないは札にして目立たせる
+fn state_cell(ui: &mut Ui, pal: &Palette, s: ProcState) {
+    if s == ProcState::TouchFree {
+        widgets::pill(ui, s.label(), pal.accent);
+        return;
+    }
+    let dot = match s {
+        ProcState::Running => widgets::tint(pal.ok, 170),
+        _ => state_color(pal, s),
+    };
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(10.0, 10.0), Sense::hover());
+    ui.painter().circle_filled(rect.center(), 3.5, dot);
+    ui.add(egui::Label::new(RichText::new(s.label()).color(state_color(pal, s))).selectable(false));
+}
+
+/// 名前の文字。切れているときだけ、マウスを置くと全部の名前とパスを出す
+fn name_label(ui: &mut Ui, pal: &Palette, text: String, color: Color32, path: Option<&str>) {
+    let (pos, galley, resp) = egui::Label::new(RichText::new(text).color(color)).truncate().selectable(false).layout_in_ui(ui);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, galley.text()));
+    let elided = galley.elided;
+    if ui.is_rect_visible(resp.rect) {
+        ui.painter().galley(pos, galley.clone(), color);
+    }
+    if elided {
+        resp.on_hover_ui(|ui| {
+            ui.set_max_width(560.0);
+            ui.label(RichText::new(galley.job.text.as_str()).strong());
+            if let Some(p) = path {
+                ui.label(RichText::new(p).color(pal.weak));
+            }
+        });
+    }
+}
+
+/// 見出しの 1 つのセル。上に全体の値(塗り)、下に列の名前と並べ替えの印。押すと並べ替え
+fn header_cell(ui: &mut Ui, pal: &Palette, title: &str, c: Column, sort: Option<bool>, total: Option<(String, f32)>, heat: bool) -> bool {
+    let rect = ui.max_rect();
+    let resp = ui.interact(rect, ui.scope_id().with(("hdr", c.key())), Sense::click());
+    if heat && let Some((_, f)) = &total {
+        widgets::paint_heat(ui, rect, pal, *f);
+    }
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 0.0, widgets::tint(ui.visuals().strong_text_color(), 14));
+    }
+    let numeric = c.is_numeric();
+    let pad = space::S;
+    let (x, anchor_t) = if numeric { (rect.right() - pad, Align2::RIGHT_TOP) } else { (rect.left() + pad, Align2::LEFT_TOP) };
+    let p = ui.painter();
+    if let Some((t, _)) = &total {
+        p.text(egui::pos2(x, rect.top() + 3.0), anchor_t, t, FontId::proportional(size::BODY + 2.0), ui.visuals().strong_text_color());
+    }
+    let title_color = if sort.is_some() { pal.accent } else { pal.weak };
+    let bottom = rect.bottom() - 4.0;
+    // 並べ替えの印は字に頼らず三角を描く(数字の列は名前の左、他は右)
+    let font = FontId::proportional(size::SMALL + 1.0);
+    let g = p.layout_no_wrap(title.to_string(), font, title_color);
+    let tw = g.size().x;
+    let tri_w = if sort.is_some() { 12.0 } else { 0.0 };
+    let tx = if numeric { x - tw } else { x };
+    p.galley(egui::pos2(tx, bottom - g.size().y), g, title_color);
+    if let Some(desc) = sort {
+        let cx = if numeric { tx - tri_w / 2.0 - 1.0 } else { tx + tw + tri_w / 2.0 + 1.0 };
+        let cy = bottom - 7.0;
+        let pts = if desc {
+            vec![egui::pos2(cx - 4.0, cy - 2.0), egui::pos2(cx + 4.0, cy - 2.0), egui::pos2(cx, cy + 3.0)]
+        } else {
+            vec![egui::pos2(cx - 4.0, cy + 3.0), egui::pos2(cx + 4.0, cy + 3.0), egui::pos2(cx, cy - 2.0)]
+        };
+        p.add(egui::Shape::convex_polygon(pts, pal.accent, Stroke::NONE));
+    }
+    let mark = match sort {
+        Some(true) => " ▼",
+        Some(false) => " ▲",
+        None => "",
+    };
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{title}{mark}")));
+    resp.clicked()
+}
+
 /// 開閉の印。字に頼らず三角を描く
 fn toggle(ui: &mut Ui, expanded: bool, color: Color32) -> bool {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::click());
@@ -568,8 +777,15 @@ pub fn ui(st: &mut State, ui: &mut Ui) {
     }
     // 詳細パネル(表の下。既定は窓の 35%。§4.4)
     let full_h = ui.available_height();
-    if st.procs.detail.collapsed {
+    // 表の場所がとても低いとき(小さな窓で大きな文字)は、詳細を見出しの行だけにして表を残す
+    let forced = !st.procs.detail.collapsed && full_h < 260.0;
+    if st.procs.detail.collapsed || forced {
+        // 畳んだ形で描く間だけ畳んだことにし、利用者の選び(collapsed)は変えない
+        st.procs.detail.collapsed = true;
         egui::Panel::bottom("detail_c").resizable(false).show(ui, |ui| details::ui(st, ui));
+        if forced && st.procs.detail.collapsed {
+            st.procs.detail.collapsed = false;
+        }
     } else {
         egui::Panel::bottom("detail")
             .resizable(true)
@@ -578,8 +794,7 @@ pub fn ui(st: &mut State, ui: &mut Ui) {
             .show(ui, |ui| details::ui(st, ui));
     }
     if st.snap.seq == 0 {
-        ui.add_space(24.0);
-        ui.vertical_centered(|ui| ui.label("プロセスを読み込んでいます"));
+        widgets::empty_state(ui, &pal, "プロセスを読み込んでいます", None);
         return;
     }
     jump_if_asked(st);
@@ -587,8 +802,8 @@ pub fn ui(st: &mut State, ui: &mut Ui) {
     keyboard(st, ui);
     refresh(st);
     if st.procs.visible.is_empty() {
-        ui.add_space(24.0);
-        ui.vertical_centered(|ui| ui.label("一致するプロセスはありません"));
+        let hint = (!st.procs.filter.trim().is_empty()).then_some("欄の右の × で絞り込みを消せます。書き方は欄の横の「?」にあります");
+        widgets::empty_state(ui, &pal, "一致するプロセスはありません", hint);
         return;
     }
     // 届いたアイコンをテクスチャにする
@@ -644,6 +859,10 @@ fn table(st: &State, ui: &mut Ui, pal: &Palette, scroll_row: Option<usize>) -> E
     let tree_view = st.cfg.view == View::Tree;
     let table_clip = ui.clip_rect();
     let spacing_x = ui.spacing().item_spacing.x;
+    let row_h = st.cfg.density.row_h();
+    let heat_on = st.cfg.heat_map;
+    let mem_total = snap.perf.mem.as_ref().map(|m| m.total);
+    let totals = &st.procs.totals;
     let mut tb = TableBuilder::new(ui)
         // egui_extras は列の幅を位置で覚えるので、並びが変わったら表を作り直して config の幅を当て直す
         .id_salt(("procs", &cols))
@@ -656,33 +875,41 @@ fn table(st: &State, ui: &mut Ui, pal: &Palette, scroll_row: Option<usize>) -> E
     for c in &cols {
         tb = tb.column(egui_extras::Column::initial(st.cfg.columns.width(*c)).range(40.0..=800.0).clip(true));
     }
+    // 余りの幅を取る空の列。選んだ行・新しい行の色と見出しの線を窓の右端まで届かせる
+    tb = tb.column(egui_extras::Column::remainder().at_least(0.0).resizable(false).clip(true));
     if let Some(i) = scroll_row {
         tb = tb.scroll_to_row(i, Some(Align::Center));
     }
     let show_sig = cols.contains(&Column::Signature);
-    tb.header(ROW_H + 2.0, |mut h| {
-        for c in &cols {
+    tb.header(HEADER_H, |mut h| {
+        for (ci, c) in cols.iter().enumerate() {
             h.col(|ui| {
-                let mark = if *c == sort_col { if desc { " ▼" } else { " ▲" } } else { "" };
-                let text = RichText::new(format!("{}{mark}", column_title(st, *c))).strong();
-                let layout = if c.is_numeric() { Layout::right_to_left(Align::Center) } else { Layout::left_to_right(Align::Center) };
-                ui.with_layout(layout, |ui| {
-                    if ui.add(egui::Label::new(text).sense(Sense::click()).selectable(false)).clicked() {
-                        ev.sort = Some(*c);
-                    }
-                });
+                // 見出しの下の線は窓の右端まで(セルは切り抜かれるので層に直接描く)
+                if ci == 0 {
+                    let r = ui.max_rect();
+                    let clip = Rect::from_x_y_ranges(table_clip.x_range(), r.top()..=r.bottom() + 2.0);
+                    ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(clip).hline(
+                        r.left() - spacing_x..=table_clip.right(),
+                        r.bottom() + 1.0,
+                        Stroke::new(1.0, pal.border),
+                    );
+                }
+                let sort = (*c == sort_col).then_some(desc);
+                if header_cell(ui, pal, column_title(st, *c), *c, sort, totals.of_column(*c), heat_on) {
+                    ev.sort = Some(*c);
+                }
             });
         }
+        h.col(|_| {});
     })
     .body(|body| {
-        let widths = body.widths().to_vec();
+        let widths = body.widths()[..cols.len()].to_vec();
         let changed = cols.iter().zip(&widths).any(|(c, w)| (st.cfg.columns.width(*c) - w).abs() > 0.5);
         let gap = spacing_x;
-        let total_w = widths.iter().sum::<f32>() + gap * widths.len().saturating_sub(1) as f32;
         if changed {
             ev.widths = Some(widths);
         }
-        body.rows(ROW_H, visible.len(), |mut row| {
+        body.rows(row_h, visible.len(), |mut row| {
             let v = &visible[row.index()];
             let r = &snap.rows[v.index];
             let selected = st.procs.selected.contains(&r.id);
@@ -694,6 +921,8 @@ fn table(st: &State, ui: &mut Ui, pal: &Palette, scroll_row: Option<usize>) -> E
             } else {
                 None
             };
+            // 塗りは選んだ行・新しい行・終わった行・絞り込みで残した親・System Idle Process では使わない(行の色を優先)
+            let heat_row = heat_on && !selected && bg.is_none() && !v.dimmed && r.id.pid != 0;
             if let Some(p) = r.path() {
                 if !st.icons.contains_key(p) {
                     ev.icons.push(p.to_string());
@@ -704,19 +933,29 @@ fn table(st: &State, ui: &mut Ui, pal: &Palette, scroll_row: Option<usize>) -> E
             }
             for (ci, c) in cols.iter().enumerate() {
                 row.col(|ui| {
-                    // 新しい行・終わった行の背景は行の幅いっぱいに塗る(セルは切り抜かれるので層に直接描く)
-                    if let (Some(bg), false, 0) = (bg, selected, ci) {
-                        let r = ui.max_rect();
-                        let row_rect = egui::Rect::from_min_max(
-                            egui::pos2(r.left() - gap / 2.0, r.center().y - ROW_H / 2.0),
-                            egui::pos2(r.left() + total_w + gap / 2.0, r.center().y + ROW_H / 2.0),
-                        );
-                        let clip = egui::Rect::from_x_y_ranges(table_clip.x_range(), ui.clip_rect().y_range());
-                        ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(clip).rect_filled(row_rect, 0.0, bg);
+                    let cell = ui.max_rect();
+                    let row_rect = Rect::from_x_y_ranges(cell.x_range(), cell.center().y - row_h / 2.0..=cell.center().y + row_h / 2.0);
+                    if ci == 0 {
+                        let clip = Rect::from_x_y_ranges(table_clip.x_range(), ui.clip_rect().y_range());
+                        let layer = ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(clip);
+                        // 新しい行・終わった行の背景は行の幅いっぱいに塗る(セルは切り抜かれるので層に直接描く)
+                        if let (Some(bg), false) = (bg, selected) {
+                            let full = Rect::from_x_y_ranges(row_rect.left() - gap / 2.0..=table_clip.right(), row_rect.y_range());
+                            layer.rect_filled(full, 0.0, bg);
+                        }
+                        // 触れないプロセスは左の端に強調の色の線
+                        if r.touch_free {
+                            let bar = Rect::from_x_y_ranges(row_rect.left()..=row_rect.left() + 3.0, row_rect.y_range());
+                            layer.rect_filled(bar, 0.0, pal.accent);
+                        }
+                    }
+                    if heat_row && let Some(f) = heat_frac(mem_total, r, *c) {
+                        widgets::paint_heat(ui, row_rect, pal, f);
                     }
                     let text_color = if v.dimmed { pal.weak } else { ui.visuals().text_color() };
                     match c {
                         Column::Name => {
+                            ui.add_space(space::S);
                             if tree_view {
                                 ui.add_space(v.depth as f32 * 16.0);
                                 if v.has_children {
@@ -727,28 +966,27 @@ fn table(st: &State, ui: &mut Ui, pal: &Palette, scroll_row: Option<usize>) -> E
                                     ui.add_space(16.0);
                                 }
                             }
-                            match r.path().and_then(|p| st.icons.get(p)) {
-                                Some(IconSlot::Tex(t)) => {
-                                    ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(t.id(), Vec2::splat(16.0))));
-                                }
-                                _ => default_icon(ui, pal),
-                            }
-                            ui.add(egui::Label::new(RichText::new(display_name(st, r)).color(text_color)).truncate().selectable(false));
+                            row_icon(st, ui, r, pal);
+                            name_label(ui, pal, display_name(st, r), text_color, r.path());
                         }
                         Column::State => {
-                            ui.add(egui::Label::new(RichText::new(r.state.label()).color(state_color(pal, r.state))).selectable(false));
+                            ui.add_space(space::S);
+                            state_cell(ui, pal, r.state);
                         }
                         c if c.is_numeric() => {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.add_space(space::S);
                                 ui.add(egui::Label::new(RichText::new(cell_text(st, r, *c)).color(text_color)).selectable(false));
                             });
                         }
                         _ => {
+                            ui.add_space(space::S);
                             ui.add(egui::Label::new(RichText::new(cell_text(st, r, *c)).color(text_color)).truncate().selectable(false));
                         }
                     }
                 });
             }
+            row.col(|_| {});
             let resp = row.response();
             if resp.double_clicked() {
                 ev.double = Some(r.id);

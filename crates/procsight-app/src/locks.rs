@@ -4,8 +4,9 @@
 
 use eframe::egui;
 use crate::app::{Load, State, Tab};
-use crate::theme;
-use egui::{Align, Layout, RichText, Sense, Ui};
+use crate::theme::{self, space};
+use crate::widgets;
+use egui::{Align, Align2, Layout, RichText, Sense, Ui, Vec2};
 use egui_extras::TableBuilder;
 use procsight_core::ProcId;
 use procsight_win::jobs::{Job, LockingProcess, OpError};
@@ -90,34 +91,57 @@ pub fn window(st: &mut State, ui: &mut Ui) {
     let mut open = true;
     let ctx = ui.ctx().clone();
     let touch_running = !st.snap.touch_free.is_empty();
-    egui::Window::new("ファイルを掴んでいるプロセスを探す").open(&mut open).collapsible(false).default_size([640.0, 420.0]).min_size([600.0, 380.0]).show(&ctx, |ui| {
-        ui.set_min_size(egui::vec2(600.0, 340.0));
+    // 狭い窓・大きな文字でもはみ出さない大きさ(題の帯の分を引く)
+    let screen = ctx.content_rect();
+    let max = Vec2::new(screen.width() - 24.0, screen.height() - 64.0);
+    egui::Window::new("ファイルを掴んでいるプロセスを探す")
+        .open(&mut open)
+        .collapsible(false)
+        .default_size(Vec2::new(640.0, 440.0).min(max))
+        .min_size(Vec2::new(600.0, 380.0).min(max))
+        .max_size(max)
+        .pivot(Align2::CENTER_CENTER)
+        .default_pos(screen.center())
+        .show(&ctx, |ui| {
         if touch_running {
-            ui.label(RichText::new("触れないプロセスが動いている間は、この検索を使えません").color(pal.warn));
+            crate::dialogs::note(ui, pal.warn, "触れないプロセスが動いている間は、この検索を使えません");
+            ui.add_space(space::S);
         }
-        ui.horizontal(|ui| {
-            ui.label("ここにファイルをドロップするか、");
-            if ui.button("ファイルを選ぶ…").clicked() {
-                st.job(Job::PickFiles);
+        // ファイルを受ける場所
+        widgets::card(ui, &pal, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.label("ここにファイルをドロップするか、");
+                if ui.button("ファイルを選ぶ…").clicked() {
+                    st.job(Job::PickFiles);
+                }
+            });
+            if let Some(p) = st.locks.problem {
+                ui.add(egui::Label::new(RichText::new(p).color(pal.danger)).wrap());
+            }
+            if !st.locks.files.is_empty() {
+                ui.add_space(space::XS);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(format!("(選んだファイル: {} 個)", st.locks.files.len())).color(pal.weak));
+                    for p in st.locks.files.iter().take(6) {
+                        widgets::pill(ui, file_name(p), pal.accent);
+                    }
+                    if st.locks.files.len() > 6 {
+                        ui.label(RichText::new("…").color(pal.weak));
+                    }
+                });
             }
         });
-        if let Some(p) = st.locks.problem {
-            ui.label(RichText::new(p).color(pal.danger));
-        }
-        if !st.locks.files.is_empty() {
-            let names: Vec<&str> = st.locks.files.iter().take(6).map(|p| file_name(p)).collect();
-            let more = if st.locks.files.len() > 6 { " …" } else { "" };
-            ui.label(RichText::new(format!("(選んだファイル: {} 個)  {}{more}", st.locks.files.len(), names.join("  "))).color(pal.weak));
-        }
-        ui.separator();
+        ui.add_space(space::S);
         let mut go = None;
         // 結果の表の場所(ボタンの行を下に置く)
-        let h = (ui.available_height() - 40.0).max(220.0);
+        let h = (ui.available_height() - 40.0).max(60.0);
         let w = ui.available_width();
         ui.allocate_ui(egui::vec2(w, h), |ui| {
             ui.set_min_size(egui::vec2(w, h));
             result_area(st, ui, &pal, &mut go)
         });
+        ui.add_space(space::S);
         let mut search = false;
         ui.horizontal(|ui| {
             let can_go = st.locks.selected.is_some() && matches!(st.locks.result, Load::Ready(_));
@@ -135,7 +159,7 @@ pub fn window(st: &mut State, ui: &mut Ui) {
                 } else {
                     None
                 };
-                let r = ui.add_enabled(why.is_none() && !matches!(st.locks.result, Load::Loading), egui::Button::new("探す"));
+                let r = ui.add_enabled(why.is_none() && !matches!(st.locks.result, Load::Loading), widgets::primary_button(&pal, "探す").min_size(Vec2::new(84.0, 0.0)));
                 if let Some(w) = why {
                     r.on_disabled_hover_text(w);
                 } else if r.clicked() {
@@ -162,18 +186,15 @@ pub fn window(st: &mut State, ui: &mut Ui) {
 /// 結果の表と、探している・見つからない・失敗の文
 fn result_area(st: &State, ui: &mut Ui, pal: &crate::theme::Palette, go: &mut Option<(usize, bool)>) {
     match &st.locks.result {
-            Load::NotAsked => {}
-            Load::Loading => {
-                ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new());
-                    ui.label("探しています");
-                });
+            Load::NotAsked => {
+                widgets::empty_state(ui, pal, "ファイルを選んで「探す」を押してください", None);
             }
+            Load::Loading => crate::services_view::loading(ui, pal, "探しています"),
             Load::Failed(e) => {
-                ui.label(RichText::new(e.message(st.env.elevated)).color(pal.danger));
+                widgets::empty_state(ui, pal, &e.message(st.env.elevated), None);
             }
             Load::Ready(list) if list.is_empty() => {
-                ui.label("このファイルを使っているプロセスは見つかりませんでした");
+                widgets::empty_state(ui, pal, "このファイルを使っているプロセスは見つかりませんでした", None);
             }
             Load::Ready(list) => {
                 let file_col = if st.locks.files.len() == 1 {
@@ -181,16 +202,18 @@ fn result_area(st: &State, ui: &mut Ui, pal: &crate::theme::Palette, go: &mut Op
                 } else {
                     format!("選んだ {} 個のどれか", st.locks.files.len())
                 };
+                let row_h = st.cfg.density.row_h();
+                let w = ui.available_width();
                 TableBuilder::new(ui)
                     .id_salt("locks_table")
                     .striped(true)
                     .sense(Sense::click())
                     .cell_layout(Layout::left_to_right(Align::Center))
-                    .column(egui_extras::Column::initial(180.0).clip(true))
-                    .column(egui_extras::Column::initial(70.0))
-                    .column(egui_extras::Column::initial(110.0))
-                    .column(egui_extras::Column::remainder().clip(true))
-                    .header(20.0, |mut hd| {
+                    .column(egui_extras::Column::initial((w * 0.34).max(80.0)).at_least(80.0).clip(true))
+                    .column(egui_extras::Column::initial((w * 0.1).max(50.0)).at_least(50.0))
+                    .column(egui_extras::Column::initial((w * 0.18).max(60.0)).at_least(50.0).clip(true))
+                    .column(egui_extras::Column::remainder().at_least(60.0).clip(true))
+                    .header(row_h + 2.0, |mut hd| {
                         for t in ["名前", "PID", "種類", "ファイル"] {
                             hd.col(|ui| {
                                 ui.strong(t);
@@ -198,7 +221,7 @@ fn result_area(st: &State, ui: &mut Ui, pal: &crate::theme::Palette, go: &mut Op
                         }
                     })
                     .body(|body| {
-                        body.rows(20.0, list.len(), |mut row| {
+                        body.rows(row_h, list.len(), |mut row| {
                             let i = row.index();
                             let l = &list[i];
                             row.set_selected(st.locks.selected == Some(i));

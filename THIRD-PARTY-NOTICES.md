@@ -4,7 +4,7 @@ ProcSight.exe includes the following Rust crates. Their licenses are reproduced 
 
 ## Overview
 
-- MIT License (156)
+- MIT License (155)
 - Apache License 2.0 (10)
 - Unicode License v3 (2)
 - ISC License (1)
@@ -2828,12 +2828,12 @@ SOFTWARE.
 
 Used by:
 
-- procsight-app 0.1.0
-- procsight-core 0.1.0
-- procsight-probe 0.1.0
-- procsight-testee 0.1.0
-- procsight-uiprobe 0.1.0
-- procsight-win 0.1.0
+- procsight-app 0.2.0
+- procsight-core 0.2.0
+- procsight-probe 0.2.0
+- procsight-testee 0.2.0
+- procsight-uiprobe 0.2.0
+- procsight-win 0.2.0
 - accesskit 0.25.2
 - accesskit_consumer 0.39.2
 - accesskit_windows 0.35.2
@@ -2844,7 +2844,6 @@ Used by:
 - egui-winit 0.37.0
 - egui 0.37.0
 - egui_extras 0.37.0
-- egui_plot 0.38.0
 - egui_system_font_provider 0.37.0
 - emath 0.37.0
 - epaint 0.37.0

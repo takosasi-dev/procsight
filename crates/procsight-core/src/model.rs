@@ -178,6 +178,11 @@ pub struct MemSample {
     pub available: u64,
     pub commit_total: u64,
     pub commit_limit: u64,
+    /// システムのキャッシュ(GetPerformanceInfo の SystemCache)。0 は取れない
+    pub cached: u64,
+    /// カーネルのページ プールと非ページ プール。0 は取れない
+    pub paged_pool: u64,
+    pub nonpaged_pool: u64,
 }
 
 impl MemSample {

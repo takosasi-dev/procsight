@@ -33,6 +33,35 @@ pub enum CloseAction {
     Tray,
 }
 
+/// 表の行の高さ(v0.2.0)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Density {
+    Compact,
+    #[default]
+    Normal,
+    Comfortable,
+}
+
+impl Density {
+    pub const ALL: [Density; 3] = [Density::Compact, Density::Normal, Density::Comfortable];
+    pub fn label(self) -> &'static str {
+        match self {
+            Density::Compact => "詰める",
+            Density::Normal => "標準",
+            Density::Comfortable => "ゆったり",
+        }
+    }
+    /// 表の 1 行の高さ(ポイント)
+    pub fn row_h(self) -> f32 {
+        match self {
+            Density::Compact => 18.0,
+            Density::Normal => 22.0,
+            Density::Comfortable => 26.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct TaskmgrReplace {
@@ -149,6 +178,10 @@ pub struct Config {
     pub touch_free: TouchFree,
     pub columns: Columns,
     pub window: WindowPlacement,
+    /// 数字の列の背景を使用量で塗る(v0.2.0)
+    pub heat_map: bool,
+    /// 表の行の高さ(v0.2.0)
+    pub density: Density,
 }
 
 impl Default for Config {
@@ -167,6 +200,8 @@ impl Default for Config {
             touch_free: TouchFree::default(),
             columns: Columns::default(),
             window: WindowPlacement::default(),
+            heat_map: true,
+            density: Density::Normal,
         }
     }
 }
@@ -256,6 +291,52 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// v0.1.0 が書いた config.toml(heat_map・density が無い)をそのまま読めて、新しい項目は既定になる
+    #[test]
+    fn v0_1_0_config_still_loads() {
+        let v010 = r#"schema_version = 1
+interval_ms = 2000
+theme = "dark"
+font_scale = 1.2
+view = "flat"
+close_action = "exit"
+tray_enabled = false
+elevate_on_start = false
+fonts = []
+
+[taskmgr_replace]
+enabled = false
+previous_debugger = ""
+
+[touch_free]
+names = ["acegame.exe"]
+include_descendants = true
+
+[columns]
+visible = ["name", "pid", "state", "cpu", "mem"]
+
+[columns.sort]
+column = "cpu"
+descending = true
+
+[window]
+x = 100
+y = 100
+width = 1100
+height = 720
+maximized = false
+"#;
+        let (c, w) = Config::parse(v010).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(c.interval_ms, 2000);
+        assert_eq!(c.touch_free.names, vec!["acegame.exe".to_string()]);
+        assert!(c.heat_map);
+        assert_eq!(c.density, Density::Normal);
+        // 書き戻して読み直しても同じ
+        let again = Config::parse(&toml::to_string(&c).unwrap()).unwrap().0;
+        assert_eq!(again, c);
+    }
 
     #[test]
     fn empty_file_is_default() {

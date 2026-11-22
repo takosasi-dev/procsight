@@ -866,18 +866,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "egui_plot"
-version = "0.38.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c34f8fe086d7e69ce558dcc85f7c7be593092525d01cb30caa560044bc2bbaa"
-dependencies = [
- "ahash",
- "egui",
- "emath",
- "nohash-hasher",
-]
-
-[[package]]
 name = "egui_system_font_provider"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2391,12 +2379,12 @@ dependencies = [
 
 [[package]]
 name = "procsight-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "egui_extras",
  "egui_kittest",
- "egui_plot",
+ "image",
  "procsight-core",
  "procsight-win",
  "tray-icon",
@@ -2405,7 +2393,7 @@ dependencies = [
 
 [[package]]
 name = "procsight-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "toml",
@@ -2413,7 +2401,7 @@ dependencies = [
 
 [[package]]
 name = "procsight-probe"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "procsight-core",
  "procsight-win",
@@ -2421,7 +2409,7 @@ dependencies = [
 
 [[package]]
 name = "procsight-testee"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "procsight-core",
  "procsight-win",
@@ -2430,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "procsight-uiprobe"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "egui_extras",
@@ -2439,7 +2427,7 @@ dependencies = [
 
 [[package]]
 name = "procsight-win"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "procsight-core",
  "windows",
