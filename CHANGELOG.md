@@ -3,9 +3,9 @@
 All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-11-22
 
-Planned as 0.1.0 after hands-on verification.
+Pre-release. Administrator operations, replacing Task Manager and comparisons with Task Manager's numbers are not yet verified by hands-on use.
 
 ### Added
 
@@ -17,3 +17,5 @@ Planned as 0.1.0 after hands-on verification.
 - Startup tab (registry Run and startup folders) and Services tab
 - Optional replacement of Task Manager for Ctrl+Shift+Esc, with `restore-taskmgr.reg`
 - Settings, diagnostics, about window, tray icon, single instance, restart as administrator, dark and light themes
+
+[0.1.0]: https://github.com/takosasi-dev/procsight/releases/tag/v0.1.0

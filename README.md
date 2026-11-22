@@ -43,8 +43,8 @@ Register exe names (for example `game.exe`) under Settings → Touch-free proces
 
 ## Usage
 
-1. A prebuilt zip will be published on [Releases](https://github.com/takosasi-dev/procsight/releases) after hands-on verification (not yet available). Until then, build it as described in "Building from source".
-2. Put `ProcSight.exe` in any folder and run it.
+1. Download `procsight-v<version>-windows-x64.zip` from [Releases](https://github.com/takosasi-dev/procsight/releases) and extract it anywhere (v0.1.0 is a pre-release; see "Status" below).
+2. Run `ProcSight.exe`.
 
 Settings are stored in `%APPDATA%\ProcSight\config.toml` and logs in `%LOCALAPPDATA%\ProcSight\logs\` (7 days). Logs never contain command lines, full paths or user names.
 
@@ -99,7 +99,7 @@ UI tests render without creating a window (egui_kittest). `procsight-testee` is 
 
 ## Status
 
-v0.1.0 is in preparation and has not been released yet. The automated tests (about 130) and checks with standard user rights pass. Administrator operations (services, all-users startup items, replacing Task Manager) and comparisons with Task Manager's numbers are still waiting for hands-on verification.
+v0.1.0 is a pre-release. The UI is verified with windowless rendering tests, but not yet by hands-on use. The automated tests (about 130) and checks with standard user rights pass. Administrator operations (services, all-users startup items, replacing Task Manager) and comparisons with Task Manager's numbers are still waiting for hands-on verification.
 
 ## License
 
