@@ -19,6 +19,10 @@ pub const REPLACE_TEXT: &str = "オンにすると、Windows のタスク マネ
 
 pub const TOUCH_FREE_TEXT: &str = "ここに登録した exe のプロセスには、ProcSight からハンドルを開きません。一覧には出しますが、詳細の取得と操作は行いません。ゲームのアンチチートに怪しまれないようにするための設定です。ただし、これで安全だと保証するものではありません。exe 名(例: game.exe)を 1 行に 1 つ入れてください。";
 
+pub const SLOW_TEXT: &str = "ゲームのアンチチートとは関係なく、ProcSight 自身を軽くするための設定です。触れないプロセスが終わってから 30 秒で元の間隔に戻ります";
+
+pub const ALWAYS_ON_TOP_TEXT: &str = "ほかの窓の上に出したままにします。ミニ表示(Ctrl+M)と合わせると、ゲームの横や別の画面に小さく置けます";
+
 pub const HEAT_MAP_TEXT: &str = "CPU やメモリの列の背景を、使っている量に合わせて塗ります";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -209,6 +213,13 @@ fn general(st: &mut State, ui: &mut Ui) {
     if ms != st.cfg.interval_ms {
         st.set_interval(ms);
     }
+    slow_section(st, ui, &pal);
+    head(ui, &pal, "表示");
+    let mut top = st.cfg.always_on_top;
+    if ui.checkbox(&mut top, "常に手前に表示").changed() {
+        st.set_always_on_top(top);
+    }
+    desc(ui, &pal, ALWAYS_ON_TOP_TEXT);
     head(ui, &pal, "ウィンドウを閉じたとき");
     let mut ca = st.cfg.effective_close_action();
     ui.horizontal_wrapped(|ui| {
@@ -233,6 +244,34 @@ fn general(st: &mut State, ui: &mut Ui) {
     }
     desc(ui, &pal, "オンにすると、起動のたびに UAC の確認が出ます");
     replace_section(st, ui);
+}
+
+/// 触れないプロセスが動いている間の遅い更新(v0.3.0。既定オフ)。変えたらすぐ判定し直す
+fn slow_section(st: &mut State, ui: &mut Ui, pal: &Palette) {
+    ui.add_space(space::S);
+    let mut changed = ui.checkbox(&mut st.cfg.slow_when_touch_free, "触れないプロセスが動いている間は更新を遅くする").changed();
+    desc(ui, pal, SLOW_TEXT);
+    let on = st.cfg.slow_when_touch_free;
+    let mut slow = st.cfg.slow_interval_ms;
+    ui.horizontal_wrapped(|ui| {
+        ui.add_enabled_ui(on, |ui| {
+            ui.label("遅くするときの間隔:");
+            for v in INTERVALS_MS.into_iter().filter(|v| *v >= 1000) {
+                ui.radio_value(&mut slow, v, crate::app::interval_label(v));
+            }
+        });
+    });
+    if slow != st.cfg.slow_interval_ms {
+        st.cfg.slow_interval_ms = slow;
+        changed = true;
+    }
+    if on && st.cfg.slow_interval_ms <= st.cfg.interval_ms {
+        desc(ui, pal, "今の更新間隔のほうが長いか同じため、遅くはなりません");
+    }
+    if changed {
+        st.save_config();
+        st.update_slow_down();
+    }
 }
 
 fn replace_section(st: &mut State, ui: &mut Ui) {

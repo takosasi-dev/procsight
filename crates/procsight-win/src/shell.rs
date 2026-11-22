@@ -72,6 +72,45 @@ pub fn launch_taskmgr() -> Result<(), OpError> {
     shell_execute(&system32("taskmgr.exe"), None)
 }
 
+/// IFileSaveDialog(種類は CSV、既定の拡張子 csv、最初のファイル名 `suggested`)。やめたら None。
+/// COM を STA で使うため、`pick_files` と同じく専用のスレッドで出す(v0.3.0)
+pub fn pick_save_file(suggested: &str) -> Option<String> {
+    let suggested = suggested.to_string();
+    std::thread::spawn(move || pick_save_file_sta(&suggested)).join().ok().flatten()
+}
+
+fn pick_save_file_sta(suggested: &str) -> Option<String> {
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    use windows::Win32::UI::Shell::{
+        FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT, FOS_PATHMUSTEXIST, FileSaveDialog, IFileSaveDialog, SIGDN_FILESYSPATH,
+    };
+    let _com = Com::init();
+    // 窓が閉じるまで、渡した文字列の配列を生かしておく
+    let name = wide("CSV ファイル (*.csv)");
+    let spec = wide("*.csv");
+    let ext = wide("csv");
+    let file = wide(suggested);
+    let types = [COMDLG_FILTERSPEC { pszName: pcwstr(&name), pszSpec: pcwstr(&spec) }];
+    // SAFETY: COM はこのスレッドで初期化した。渡す文字列は上の配列を指し、Show が戻るまで生きている。
+    // 返った文字列は CoTaskMemFree で返す
+    unsafe {
+        let dlg = CoCreateInstance::<_, IFileSaveDialog>(&FileSaveDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let opts = dlg.GetOptions().ok()?;
+        dlg.SetOptions(opts | FOS_OVERWRITEPROMPT | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM).ok()?;
+        dlg.SetFileTypes(&types).ok()?;
+        dlg.SetFileTypeIndex(1).ok()?;
+        dlg.SetDefaultExtension(pcwstr(&ext)).ok()?;
+        dlg.SetFileName(pcwstr(&file)).ok()?;
+        dlg.Show(None).ok()?; // やめた(ERROR_CANCELLED)も None
+        let item = dlg.GetResult().ok()?;
+        let p = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = crate::util::pwstr_to_string(p);
+        CoTaskMemFree(Some(p.0 as *const core::ffi::c_void));
+        (!path.is_empty()).then_some(path)
+    }
+}
+
 /// IFileOpenDialog(複数選択)。やめたら空。COM を STA で使うため専用のスレッドで出す
 pub fn pick_files() -> Vec<String> {
     std::thread::spawn(pick_files_sta).join().unwrap_or_default()

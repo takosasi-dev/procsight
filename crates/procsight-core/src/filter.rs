@@ -271,6 +271,8 @@ pub fn column_value(row: &ProcessRow, col: Column) -> SortValue {
         Column::Path => row.path().map_or(None, |p| Text(p.to_lowercase())),
         Column::Signature => None,
         Column::ParentPid => Num(row.parent_pid as f64),
+        // 推移の列は今の CPU で並べる
+        Column::CpuHistory => num(row.cpu_pct.map(f64::from)),
     }
 }
 

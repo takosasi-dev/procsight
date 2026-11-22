@@ -14,9 +14,10 @@ use procsight_core::filter::{self, Query, Scope, SortValue};
 use procsight_core::format;
 use procsight_core::rules;
 use procsight_core::tree::{self, Forest, VisibleRow};
+use procsight_core::ring::{GRAPH_POINTS, Ring};
 use procsight_core::{Column, Priority, ProcId, ProcState, ProcessRow, Snapshot};
 use procsight_win::jobs::{Job, Target};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// 見出しの高さ(上に全体の値、下に列の名前の 2 段)
 const HEADER_H: f32 = 42.0;
@@ -79,6 +80,78 @@ fn heat_frac(mem_total: Option<u64>, r: &ProcessRow, c: Column) -> Option<f32> {
     }
 }
 
+/// CPU の推移の縦の位置(0〜1)。目盛りは全部の行で 0〜100% に固定し、使用量の塗り(heat_frac)と同じ平方根で曲げる。
+/// 行ごとの最大に合わせると 0.5% の揺れと 90% の山が同じ高さに見え、行どうしを見比べられない。
+/// 直線の 0〜100% だと数 % の行が底に張り付く。平方根なら 1% が 1 割、25% が半分の高さで、両方を満たす
+fn spark_y(pct: f32) -> f32 {
+    (pct / 100.0).clamp(0.0, 1.0).sqrt()
+}
+
+/// 折れ線の色。今の CPU が SPARK_HOT 未満はグラフの色、以上は使用量の塗り(heat)と同じ系統の橙。
+/// 間を混ぜると青と橙の間の濁った灰色になるので、2 色で切り替える
+fn spark_color(pal: &Palette, now_pct: f32) -> Color32 {
+    if now_pct >= SPARK_HOT { pal.graph2 } else { pal.graph }
+}
+
+/// 折れ線を橙にする今の CPU(%)。CPU の列の塗りがはっきり橙に見え始める辺り
+const SPARK_HOT: f32 = 15.0;
+
+/// 小さな折れ線と、その下の薄い塗り(左が古く、右が今。60 回に満たない間は右に寄せる)。値は CPU の %(spark_y で縦に)。
+/// perf.rs の paint_line と同じ形
+fn paint_spark(painter: &egui::Painter, rect: Rect, vals: impl ExactSizeIterator<Item = f32>, color: Color32, fill: Color32) {
+    let len = vals.len().min(GRAPH_POINTS);
+    if len < 2 || rect.width() < 4.0 {
+        return;
+    }
+    let n = (GRAPH_POINTS - 1) as f32;
+    let start = GRAPH_POINTS - len;
+    let mut pts = Vec::with_capacity(len);
+    // 塗りは 1 枚の網で(区切りごとの多角形だと、境目に細い線が見える。中がへこんだ形なので凸の多角形は使えない)
+    let mut mesh = egui::Mesh::default();
+    mesh.reserve_vertices(len * 2);
+    mesh.reserve_triangles((len - 1) * 2);
+    for (i, v) in vals.take(len).enumerate() {
+        let x = rect.left() + (start + i) as f32 / n * rect.width();
+        let p = egui::pos2(x, rect.bottom() - spark_y(v) * rect.height());
+        pts.push(p);
+        mesh.colored_vertex(p, fill);
+        mesh.colored_vertex(egui::pos2(x, rect.bottom()), fill);
+        if i > 0 {
+            let k = (i as u32) * 2;
+            mesh.add_triangle(k - 2, k - 1, k);
+            mesh.add_triangle(k - 1, k + 1, k);
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
+    painter.add(egui::Shape::line(pts, Stroke::new(1.25, color)));
+}
+
+/// CPU の推移の列のセル。マウスを置くと今・最大・平均を出す
+fn cpu_spark_cell(st: &State, ui: &mut Ui, pal: &Palette, r: &ProcessRow, row_rect: Rect, selected: bool, weak: bool) {
+    let Some(h) = st.procs.cpu_hist.get(&r.id) else { return };
+    let cell = ui.max_rect();
+    let rect = Rect::from_x_y_ranges(cell.left() + space::S..=cell.right() - space::S, row_rect.top() + 3.0..=row_rect.bottom() - 3.0);
+    let now = h.vals.last().copied().unwrap_or(0.0);
+    let max = h.vals.iter().copied().fold(0.0, f32::max);
+    // 選んだ行は地が強調の色なので、線は濃い文字の色に。絞り込みで残した親は弱い色
+    let color = if selected {
+        ui.visuals().strong_text_color()
+    } else if weak {
+        pal.weak
+    } else {
+        spark_color(pal, now)
+    };
+    let fill = widgets::tint(color, if selected { 56 } else { 44 });
+    paint_spark(ui.painter(), rect, h.vals.iter().copied(), color, fill);
+    let resp = ui.interact(rect, ui.scope_id().with(("cpu_spark", r.id)), Sense::hover());
+    resp.on_hover_ui(|ui| {
+        let n = h.vals.len().max(1);
+        let avg = h.vals.iter().sum::<f32>() / n as f32;
+        ui.label(RichText::new(format!("CPU の推移(直近 {} 回)", h.vals.len())).strong());
+        ui.label(format!("今 {}  最大 {}  平均 {}", format::pct(Some(now)), format::pct(Some(max)), format::pct(Some(avg))));
+    });
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct ListKey {
     seq: u64,
@@ -107,6 +180,19 @@ pub struct ProcsView {
     /// 解析した絞り込み(元の文字と対。文字が変わったときだけ解析し直す)
     query: (String, Query),
     totals: HeaderTotals,
+    /// CPU の推移の列(v0.3.0): 識別子 → 直近 60 回の CPU %。メモリの中だけに持ち、保存しない
+    cpu_hist: HashMap<ProcId, CpuHist>,
+    /// 見出しの上の段に描く全体の CPU の推移
+    cpu_total_hist: Ring<f32>,
+    /// 最後に推移を進めた Snapshot の seq
+    hist_seq: u64,
+}
+
+/// 1 つのプロセスの CPU の推移
+struct CpuHist {
+    /// 最後に一覧で見かけた Snapshot の seq(見かけなくなった物を消す印)
+    seen: u64,
+    vals: Ring<f32>,
 }
 
 impl ProcsView {
@@ -114,6 +200,9 @@ impl ProcsView {
         ProcsView {
             query: Default::default(),
             totals: HeaderTotals::default(),
+            cpu_hist: HashMap::new(),
+            cpu_total_hist: Ring::default(),
+            hist_seq: 0,
             filter: String::new(),
             scope: Scope::All,
             focus_filter: false,
@@ -135,6 +224,41 @@ impl ProcsView {
 
     pub fn on_snapshot(&mut self, snap: &Snapshot) {
         self.detail.push_history(snap);
+        self.push_cpu_history(snap);
+    }
+
+    /// CPU の推移を 1 回分進める。seq が変わったときだけ。終わった(is_gone)・一覧から消えた識別子は消す。
+    /// 最小化中の周(rows_stale)は行の値が無いので、足しも消しもしない
+    fn push_cpu_history(&mut self, snap: &Snapshot) {
+        if snap.seq == self.hist_seq {
+            return;
+        }
+        self.hist_seq = snap.seq;
+        if let Some(c) = snap.perf.cpu_total {
+            self.cpu_total_hist.push(c);
+        }
+        if snap.rows_stale {
+            return;
+        }
+        for r in snap.rows.iter().filter(|r| r.is_gone == 0) {
+            let h = self.cpu_hist.entry(r.id).or_insert_with(|| CpuHist { seen: 0, vals: Ring::default() });
+            h.seen = snap.seq;
+            // 触れないプロセスも SPI の値なので足す。値が無い周(最初の 1 回など)は足さない
+            if let Some(c) = r.cpu_pct.filter(|c| c.is_finite()) {
+                h.vals.push(c.max(0.0));
+            }
+        }
+        self.cpu_hist.retain(|_, h| h.seen == snap.seq);
+    }
+
+    /// CPU の推移(古い順)。テストと CSV の確かめに使う
+    pub fn cpu_history(&self, id: ProcId) -> Option<impl ExactSizeIterator<Item = f32> + '_> {
+        self.cpu_hist.get(&id).map(|h| h.vals.iter().copied())
+    }
+
+    /// 推移を持っているプロセスの数
+    pub fn cpu_history_len(&self) -> usize {
+        self.cpu_hist.len()
     }
 
     /// 1 つだけ選んでいるときの行
@@ -195,6 +319,8 @@ pub fn cell_text(st: &State, r: &ProcessRow, c: Column) -> String {
             format!("{}(終了)", r.parent_pid)
         }
         Column::ParentPid => r.parent_pid.to_string(),
+        // コピーと CSV では今の CPU を出す(表では cpu_spark_cell が折れ線を描く)
+        Column::CpuHistory => format::pct(r.cpu_pct),
     }
 }
 
@@ -208,8 +334,8 @@ fn sort_value(st: &State, r: &ProcessRow, c: Column) -> SortValue {
     filter::column_value(r, c)
 }
 
-/// 並びを必要なときだけ作り直す
-fn refresh(st: &mut State) {
+/// 並びを必要なときだけ作り直す(CSV の保存も、書く前に呼んで今の Snapshot に合わせる)
+pub(crate) fn refresh(st: &mut State) {
     let key = ListKey {
         seq: st.snap.seq,
         filter: st.procs.filter.clone(),
@@ -699,8 +825,24 @@ fn name_label(ui: &mut Ui, pal: &Palette, text: String, color: Color32, path: Op
     }
 }
 
-/// 見出しの 1 つのセル。上に全体の値(塗り)、下に列の名前と並べ替えの印。押すと並べ替え
-fn header_cell(ui: &mut Ui, pal: &Palette, title: &str, c: Column, sort: Option<bool>, total: Option<(String, f32)>, heat: bool) -> bool {
+/// 右寄せの列(数字の列と CPU の推移)。見出しの名前を右に寄せ、初めて押したときは大きい順に並べる
+fn right_aligned(c: Column) -> bool {
+    c.is_numeric() || c == Column::CpuHistory
+}
+
+/// 見出しの 1 つのセル。上に全体の値(塗り)、下に列の名前と並べ替えの印。押すと並べ替え。
+/// `spark` があれば(CPU の推移の列)、上の段に全体の CPU の推移を描く
+#[allow(clippy::too_many_arguments)]
+fn header_cell(
+    ui: &mut Ui,
+    pal: &Palette,
+    title: &str,
+    c: Column,
+    sort: Option<bool>,
+    total: Option<(String, f32)>,
+    heat: bool,
+    spark: Option<&Ring<f32>>,
+) -> bool {
     let rect = ui.max_rect();
     let resp = ui.interact(rect, ui.scope_id().with(("hdr", c.key())), Sense::click());
     if heat && let Some((_, f)) = &total {
@@ -709,12 +851,19 @@ fn header_cell(ui: &mut Ui, pal: &Palette, title: &str, c: Column, sort: Option<
     if resp.hovered() {
         ui.painter().rect_filled(rect, 0.0, widgets::tint(ui.visuals().strong_text_color(), 14));
     }
-    let numeric = c.is_numeric();
+    let numeric = right_aligned(c);
     let pad = space::S;
     let (x, anchor_t) = if numeric { (rect.right() - pad, Align2::RIGHT_TOP) } else { (rect.left() + pad, Align2::LEFT_TOP) };
     let p = ui.painter();
     if let Some((t, _)) = &total {
         p.text(egui::pos2(x, rect.top() + 3.0), anchor_t, t, FontId::proportional(size::BODY + 2.0), ui.visuals().strong_text_color());
+    }
+    if let Some(ring) = spark {
+        // 隣の CPU の列の大きな数字と同じ高さの帯に、全体の CPU(行と同じ目盛り)
+        let band = Rect::from_x_y_ranges(rect.left() + pad..=rect.right() - pad, rect.top() + 4.0..=rect.top() + 19.0);
+        let latest = ring.last().copied().unwrap_or(0.0);
+        let color = spark_color(pal, latest);
+        paint_spark(p, band, ring.iter().copied(), color, widgets::tint(color, 40));
     }
     let title_color = if sort.is_some() { pal.accent } else { pal.weak };
     let bottom = rect.bottom() - 4.0;
@@ -895,7 +1044,8 @@ fn table(st: &State, ui: &mut Ui, pal: &Palette, scroll_row: Option<usize>) -> E
                     );
                 }
                 let sort = (*c == sort_col).then_some(desc);
-                if header_cell(ui, pal, column_title(st, *c), *c, sort, totals.of_column(*c), heat_on) {
+                let spark = (*c == Column::CpuHistory).then_some(&st.procs.cpu_total_hist);
+                if header_cell(ui, pal, column_title(st, *c), *c, sort, totals.of_column(*c), heat_on, spark) {
                     ev.sort = Some(*c);
                 }
             });
@@ -973,6 +1123,8 @@ fn table(st: &State, ui: &mut Ui, pal: &Palette, scroll_row: Option<usize>) -> E
                             ui.add_space(space::S);
                             state_cell(ui, pal, r.state);
                         }
+                        // System Idle Process は塗りと同じく使用量の色にしない(空きの割合なので)
+                        Column::CpuHistory => cpu_spark_cell(st, ui, pal, r, row_rect, selected, v.dimmed || r.id.pid == 0),
                         c if c.is_numeric() => {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.add_space(space::S);
@@ -1026,8 +1178,8 @@ fn handle(st: &mut State, ui: &Ui, ev: Events) {
             s.descending = !s.descending;
         } else {
             s.column = c.key().into();
-            // 数字は大きい順から(AC-5)
-            s.descending = c.is_numeric() || c == Column::Cpu;
+            // 数字は大きい順から(AC-5)。CPU の推移は今の CPU で並べる
+            s.descending = right_aligned(c);
         }
         st.save_config();
     }
@@ -1192,6 +1344,21 @@ mod tests {
         let csrss = st.snap.rows.iter().find(|r| r.name == "csrss.exe").unwrap();
         assert!(terminate_refusal(&st, csrss).is_some());
         assert!(terminate_refusal(&st, me).is_some());
+    }
+
+    #[test]
+    fn spark_scale_is_shared_by_all_rows_and_bends_like_heat() {
+        assert_eq!(spark_y(0.0), 0.0);
+        assert!((spark_y(1.0) - 0.1).abs() < 1e-6);
+        assert!((spark_y(25.0) - 0.5).abs() < 1e-6);
+        assert_eq!(spark_y(250.0), 1.0);
+        assert_eq!(spark_y(-3.0), 0.0);
+        // 低い間はグラフの色、高いと heat と同じ橙
+        let p = crate::theme::DARK;
+        assert_eq!(spark_color(&p, 1.0), p.graph);
+        assert_eq!(spark_color(&p, 14.9), p.graph);
+        assert_eq!(spark_color(&p, 15.0), p.graph2);
+        assert_eq!(spark_color(&p, 60.0), p.graph2);
     }
 
     #[test]

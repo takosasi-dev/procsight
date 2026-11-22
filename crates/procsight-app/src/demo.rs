@@ -249,6 +249,7 @@ pub fn startup_items() -> Vec<StartupItem> {
             exe_exists: true,
             approved: Approved::Enabled,
             publisher: Some("Example Corporation".into()),
+            readonly_reason: None,
         },
         StartupItem {
             name: "Foo Helper".into(),
@@ -258,6 +259,7 @@ pub fn startup_items() -> Vec<StartupItem> {
             exe_exists: false,
             approved: Approved::Disabled(BASE_FT - 36 * 3600 * 10_000_000),
             publisher: None,
+            readonly_reason: None,
         },
         StartupItem {
             name: "AudioTray".into(),
@@ -267,6 +269,28 @@ pub fn startup_items() -> Vec<StartupItem> {
             exe_exists: true,
             approved: Approved::Unknown,
             publisher: Some("Sound Devices Ltd.".into()),
+            readonly_reason: None,
+        },
+        // v0.3.0: タスク スケジューラとストア アプリ(名前は架空)
+        StartupItem {
+            name: "\\Example\\UpdaterLogon".into(),
+            location: StartupLocation::ScheduledTask,
+            command: "\"C:\\Program Files\\Example\\updater.exe\" /logon".into(),
+            exe_path: Some("C:\\Program Files\\Example\\updater.exe".into()),
+            exe_exists: true,
+            approved: Approved::Enabled,
+            publisher: Some("Example Corporation".into()),
+            readonly_reason: None,
+        },
+        StartupItem {
+            name: "Example Notes".into(),
+            location: StartupLocation::StoreApp,
+            command: "ExampleNotes_8wekyb3d8bbwe!NotesStartup".into(),
+            exe_path: None,
+            exe_exists: true,
+            approved: Approved::Disabled(BASE_FT - 72 * 3600 * 10_000_000),
+            publisher: None,
+            readonly_reason: Some(procsight_win::startup_store::READONLY_REASON),
         },
     ]
 }

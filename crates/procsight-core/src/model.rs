@@ -299,10 +299,12 @@ pub enum Column {
     Path,
     Signature,
     ParentPid,
+    /// 直近 60 回分の CPU の小さなグラフ(メモリの中だけ。保存しない。v0.3.0)
+    CpuHistory,
 }
 
 impl Column {
-    pub const ALL: [Column; 19] = [
+    pub const ALL: [Column; 20] = [
         Column::Name,
         Column::Pid,
         Column::State,
@@ -322,6 +324,7 @@ impl Column {
         Column::Path,
         Column::Signature,
         Column::ParentPid,
+        Column::CpuHistory,
     ];
 
     pub fn key(self) -> &'static str {
@@ -345,6 +348,7 @@ impl Column {
             Column::Path => "path",
             Column::Signature => "signature",
             Column::ParentPid => "parent_pid",
+            Column::CpuHistory => "cpu_history",
         }
     }
 
@@ -374,6 +378,7 @@ impl Column {
             Column::Path => "パス",
             Column::Signature => "署名",
             Column::ParentPid => "親 PID",
+            Column::CpuHistory => "CPU の推移",
         }
     }
 
@@ -402,6 +407,7 @@ impl Column {
             Column::Path => 320.0,
             Column::User | Column::Signature => 140.0,
             Column::StartTime => 150.0,
+            Column::CpuHistory => 110.0,
             Column::State | Column::Priority => 90.0,
             _ => 80.0,
         }

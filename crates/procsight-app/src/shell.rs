@@ -3,6 +3,7 @@
 //! procsight-win の関数を直接呼ぶのは INTERFACES §3.2 の例外(起動時・クリップボード・トレイ)だけ(INV-9)。
 
 use crate::app::{Action, State};
+use crate::mini::{WindowChange, WindowFacts, window_commands};
 use crate::tray::{Tray, TrayEvent};
 use crate::{files, fonts, log};
 use eframe::egui;
@@ -32,6 +33,16 @@ pub struct Shell {
     last_seq: u64,
     save_at: Option<Instant>,
     timing_log_at: Instant,
+    /// 窓に渡し済みのミニ表示(st.mini との差を 1 回だけ命令にする)
+    applied_mini: bool,
+    /// ミニに入る前の普通の表示(出るときに戻す)
+    mini_from: Option<WindowFacts>,
+    /// このセッションで前にミニを置いた場所(保存しない)
+    mini_place: Option<(egui::Pos2, egui::Vec2)>,
+    /// ミニから出た後、窓が戻りきるまで cfg.window に書かない(戻す先と、待ちの始まり)
+    settle: Option<(WindowFacts, Instant)>,
+    /// 起動の直後に 1 回だけ送る窓の命令(常に手前)
+    startup_cmds: Vec<ViewportCommand>,
 }
 
 impl Shell {
@@ -57,6 +68,8 @@ impl Shell {
             backend.submit(Job::RestartElevated);
         }
         let tray = if st.cfg.tray_enabled { Tray::new(&cc.egui_ctx) } else { None };
+        // 常に手前(既定オフなら命令は無い)。最初の logic() で送る
+        let startup_cmds = window_commands(WindowChange::Startup { always_on_top: st.cfg.always_on_top }, &facts_of(&st.cfg.window, 1.0, None));
         Shell {
             backend: Some(backend),
             st,
@@ -71,6 +84,48 @@ impl Shell {
             last_seq: u64::MAX,
             save_at: None,
             timing_log_at: Instant::now(),
+            applied_mini: false,
+            mini_from: None,
+            mini_place: None,
+            settle: None,
+            startup_cmds,
+        }
+    }
+
+    /// st.mini と窓の差を命令にする。入る前に、小さな窓では使えない物(確認の窓・ボタン付きの帯)が出ていれば入らない
+    fn apply_mini(&mut self, ctx: &egui::Context) {
+        if self.st.mini && crate::mini::should_leave(&self.st) {
+            self.st.set_mini(false);
+        }
+        if self.st.mini == self.applied_mini {
+            return;
+        }
+        self.applied_mini = self.st.mini;
+        let zoom = ctx.zoom_factor();
+        let cmds = if self.st.mini {
+            let f = facts_of(&self.st.cfg.window, zoom, self.mini_place);
+            self.mini_from = Some(f);
+            self.settle = None;
+            window_commands(WindowChange::EnterMini, &f)
+        } else {
+            // 今のミニの場所を覚え(cfg.window と同じく zoom 1.0 の単位で)、入る前の普通の表示へ戻す。
+            // ミニの窓を OS で最大化していたら、その大きさは覚えず、先に最大化を外す
+            let (outer, inner, maxed) =
+                ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect, i.viewport().maximized.unwrap_or(false)));
+            if !maxed
+                && let (Some(o), Some(i)) = (outer, inner)
+                && plausible_position(o.min.x * zoom, o.min.y * zoom)
+            {
+                self.mini_place = Some((o.min * zoom, i.size() * zoom));
+            }
+            let f = self.mini_from.take().unwrap_or_else(|| facts_of(&self.st.cfg.window, zoom, None));
+            self.settle = Some((f, Instant::now()));
+            let mut v = if maxed { vec![ViewportCommand::Maximized(false)] } else { Vec::new() };
+            v.extend(window_commands(WindowChange::ExitMini, &f));
+            v
+        };
+        for c in cmds {
+            ctx.send_viewport_cmd(c);
         }
     }
 
@@ -94,11 +149,20 @@ impl Shell {
                     self.allow_close = true;
                     ctx.send_viewport_cmd(ViewportCommand::Close);
                 }
+                Action::SetAlwaysOnTop(on) => {
+                    let f = facts_of(&self.st.cfg.window, ctx.zoom_factor(), None);
+                    for c in window_commands(WindowChange::AlwaysOnTop(on), &f) {
+                        ctx.send_viewport_cmd(c);
+                    }
+                }
+                // 中身は見ない。同じフレームに入る・出るが積まれても、最後の st.mini だけを窓に渡す(apply_mini)
+                Action::SetMini(_) => {}
                 Action::TrayChanged => {
                     self.tray = if self.st.cfg.tray_enabled { self.tray.take().or_else(|| Tray::new(ctx)) } else { None };
                 }
             }
         }
+        self.apply_mini(ctx);
     }
 
     fn save(&mut self, force: bool) {
@@ -136,6 +200,9 @@ impl Shell {
 
 impl eframe::App for Shell {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        for c in std::mem::take(&mut self.startup_cmds) {
+            ctx.send_viewport_cmd(c);
+        }
         let Some(b) = self.backend.as_ref() else { return };
         while let Some(r) = b.try_recv() {
             self.st.apply(r);
@@ -171,18 +238,28 @@ impl eframe::App for Shell {
                 b.set_minimized(m);
             }
         }
-        if !minimized && !self.hidden {
+        // ミニから出た直後は、窓が戻りきるまで(長くても 2 秒)待つ
+        if let Some((want, since)) = &self.settle
+            && (inner.is_some_and(|i| crate::mini::geometry_settled(want, i.size(), maximized)) || since.elapsed() > Duration::from_secs(2))
+        {
+            self.settle = None;
+        }
+        // ミニの間と戻りきるまでは、保存する窓の位置と大きさを書き換えない
+        if !minimized && !self.hidden && !self.st.mini && !self.applied_mini && self.settle.is_none() {
+            // egui の点は文字の大きさ(zoom)を掛けた後の値。窓は起動時に zoom 1.0 の点で作るので、zoom を掛け戻して覚える
+            // (そうしないと、文字の大きさが 100% 以外のとき起動のたびに窓が縮む・広がる)
+            let z = ctx.zoom_factor();
             let w = &mut self.st.cfg.window;
             w.maximized = maximized;
             // Windows は最小化中の位置を -32000 で返す。その値は覚えない
             if !maximized
                 && let (Some(o), Some(i)) = (outer, inner)
-                && plausible_position(o.min.x, o.min.y)
+                && plausible_position(o.min.x * z, o.min.y * z)
             {
-                w.x = o.min.x.round() as i32;
-                w.y = o.min.y.round() as i32;
-                w.width = i.width().round().max(400.0) as u32;
-                w.height = i.height().round().max(300.0) as u32;
+                w.x = (o.min.x * z).round() as i32;
+                w.y = (o.min.y * z).round() as i32;
+                w.width = (i.width() * z).round().max(400.0) as u32;
+                w.height = (i.height() * z).round().max(300.0) as u32;
             }
         }
         // 隠している間の入力は最後に描いたフレームの物なので、閉じる要求は見ない
@@ -233,6 +310,16 @@ impl eframe::App for Shell {
         }
         log::info("exit", "");
     }
+}
+
+/// 保存している普通の表示の位置と大きさ → window_commands に渡す事実
+/// cfg.window は zoom 1.0 の点で持つ(起動時に窓を作る単位)。窓への命令は今の zoom の点なので割り戻す
+fn facts_of(w: &procsight_core::config::WindowPlacement, zoom: f32, mini: Option<(egui::Pos2, egui::Vec2)>) -> WindowFacts {
+    let z = if zoom.is_finite() && zoom > 0.0 { zoom } else { 1.0 };
+    let pos = plausible_position(w.x as f32, w.y as f32).then(|| egui::pos2(w.x as f32 / z, w.y as f32 / z));
+    // ミニの場所も zoom 1.0 の単位で覚えている
+    let mini = mini.map(|(p, s)| (egui::pos2(p.x / z, p.y / z), s / z));
+    WindowFacts { pos, size: egui::vec2(w.width as f32 / z, w.height as f32 / z), maximized: w.maximized, zoom, mini }
 }
 
 /// 窓の位置として使ってよい値か。最小化中の -32000 と、どの画面にもありそうにない値を捨てる(§9.3)。

@@ -646,7 +646,8 @@ pub fn ui(st: &mut State, ui: &mut Ui) {
     egui::Panel::left("perf_side").resizable(false).exact_size(236.0).show(ui, |ui| {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| side(&mut st.perf, ui, &pal));
     });
-    let (pv, snap, env, interval_ms) = (&mut st.perf, &st.snap, &st.env, st.cfg.interval_ms);
+    // グラフの横軸は Backend に渡している間隔(ゲーム中に遅くしているときはその値)
+    let (pv, snap, env, interval_ms) = (&mut st.perf, &st.snap, &st.env, st.effective_interval_ms);
     let mut jump = None;
     egui::CentralPanel::default_margins().show(ui, |ui| {
         // ScrollArea の中では高さに限りが無いので、グラフの高さは外で決める

@@ -244,6 +244,7 @@ fn handle(shared: &Arc<Shared>, sig: &SigCell, job: Job) -> Vec<JobResult> {
         }
         Job::ReplaceRestore { value } => vec![JobResult::ReplaceRestored { result: taskmgr_replace::restore(&value) }],
         Job::PickFiles => vec![JobResult::PickedFiles { paths: shell::pick_files() }],
+        Job::PickSaveFile { suggested } => vec![JobResult::SaveFilePicked { path: shell::pick_save_file(&suggested) }],
     }
 }
 
@@ -291,6 +292,7 @@ pub(crate) fn failed(job: &Job, e: OpError) -> JobResult {
         Job::ReplaceEnable => JobResult::ReplaceChanged { enabled: true, previous: String::new(), result: Err(e) },
         Job::ReplaceDisable { previous } => JobResult::ReplaceChanged { enabled: false, previous, result: Err(e) },
         Job::PickFiles => JobResult::PickedFiles { paths: Vec::new() },
+        Job::PickSaveFile { .. } => JobResult::SaveFilePicked { path: None },
         Job::ReplaceRestore { .. } => JobResult::ReplaceRestored { result: Err(e) },
         job => JobResult::Op { job, result: Err(e) },
     }

@@ -80,6 +80,9 @@ enum Cmd {
     RestartElevated,
     About,
     Shortcuts,
+    Mini,
+    AlwaysOnTop,
+    ExportCsv,
     Proc(ProcId),
     Service(String),
 }
@@ -162,6 +165,7 @@ struct HitsKey {
     view: View,
     theme: Theme,
     interval: u64,
+    always_on_top: bool,
 }
 
 fn word_start(t: &[char], i: usize) -> bool {
@@ -303,6 +307,9 @@ fn fixed_items(st: &State) -> Vec<Item> {
     if !st.env.elevated {
         v.push(op("管理者で再起動…", Cmd::RestartElevated).alias("admin elevate restart"));
     }
+    v.push(op("ミニ表示", Cmd::Mini).keys("Ctrl+M").alias("mini compact small window"));
+    v.push(op("常に手前に表示", Cmd::AlwaysOnTop).alias("always on top pin topmost").current(st.cfg.always_on_top));
+    v.push(op("一覧を CSV で保存…", Cmd::ExportCsv).alias("csv export save"));
     v.push(op("このソフトについて", Cmd::About).alias("about version license"));
     v.push(op("キーボードのショートカット", Cmd::Shortcuts).keys("F1").alias("keyboard shortcuts help"));
     v
@@ -342,6 +349,7 @@ fn refresh_hits(pv: &mut PaletteView, st: &State) {
         view: st.cfg.view,
         theme: st.cfg.theme,
         interval: st.cfg.interval_ms,
+        always_on_top: st.cfg.always_on_top,
     };
     if pv.hits_key.as_ref() == Some(&key) {
         return;
@@ -713,6 +721,9 @@ fn execute(st: &mut State, cmd: Cmd) {
             }
         }
         Cmd::About => st.about_open = true,
+        Cmd::Mini => st.set_mini(true),
+        Cmd::AlwaysOnTop => st.set_always_on_top(!st.cfg.always_on_top),
+        Cmd::ExportCsv => crate::export::request(st),
         Cmd::Shortcuts => {
             st.palette.help_open = true;
             st.palette.help_was_open = true;
@@ -740,6 +751,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+K", "コマンド パレットを開く・閉じる"),
             ("F1", "キーボードのショートカット(この一覧)"),
             ("Ctrl+1 〜 Ctrl+4", "タブの切り替え"),
+            ("Ctrl+M", "ミニ表示に切り替える・戻す"),
         ],
     ),
     ("プロセスの表", &[("↑ / ↓", "選ぶ行を動かす"), ("PageUp / PageDown", "選ぶ行を 1 ページ分動かす"), ("Home / End", "先頭・末尾の行を選ぶ")]),

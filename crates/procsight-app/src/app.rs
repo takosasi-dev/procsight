@@ -49,6 +49,10 @@ pub enum Action {
     Exit,
     /// トレイの設定が変わった
     TrayChanged,
+    /// 窓を常に手前に出す・戻す(v0.3.0。shell が egui の窓に渡す)
+    SetAlwaysOnTop(bool),
+    /// ミニ表示に入る・出る(v0.3.0。窓の大きさは shell が変える)
+    SetMini(bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,11 +169,18 @@ pub struct State {
     pub replace_saved: Option<String>,
     /// コマンド パレットとショートカットの一覧(v0.2.0)
     pub palette: crate::palette::PaletteView,
+    /// ミニ表示の中(v0.3.0。保存しない。起動はいつも普通の表示)
+    pub mini: bool,
+    /// ゲーム中に更新を遅くする判定(v0.3.0)
+    pub slow: procsight_core::rules::SlowDown,
+    /// Backend に渡している更新間隔(遅くしている間は cfg.interval_ms より長い)
+    pub effective_interval_ms: u64,
 }
 
 impl State {
     pub fn new(env: EnvInfo, cfg: Config) -> State {
-        State {
+        let effective_interval_ms = cfg.interval_ms;
+        let mut st = State {
             procs: procs::ProcsView::new(&cfg),
             env,
             cfg,
@@ -204,6 +215,64 @@ impl State {
             threads_req: None,
             replace_saved: None,
             palette: Default::default(),
+            mini: false,
+            slow: Default::default(),
+            effective_interval_ms,
+        };
+        st.effective_interval_ms = st.cfg.interval_ms;
+        st
+    }
+
+    /// ゲーム中(触れないプロセスが動いている間)の遅い更新を決め直す。変わったら Backend に渡し、グラフを空から始める。
+    /// 利用者の選んだ間隔(cfg.interval_ms)と設定のファイルは変えない
+    pub fn update_slow_down(&mut self) {
+        // 最小化・トレイの間の周は行が前の写し(rows_stale)なので、判定を変えない。
+        // 時刻は画面の時刻(描いたときだけ進む)ではなく、Snapshot を取った時刻
+        if self.snap.rows_stale {
+            return;
+        }
+        let running = self.snap.rows.iter().any(|r| r.state == ProcState::TouchFree && r.is_gone == 0);
+        let now_ms = self.snap.taken_at_ms;
+        let active = self.slow.update(self.cfg.slow_when_touch_free, running, now_ms);
+        let eff = procsight_core::rules::effective_interval(self.cfg.interval_ms, self.cfg.slow_interval_ms, active);
+        if eff != self.effective_interval_ms {
+            self.effective_interval_ms = eff;
+            self.perf.clear();
+            self.actions.push(Action::SetInterval(eff));
+        }
+    }
+
+    pub fn set_always_on_top(&mut self, on: bool) {
+        self.cfg.always_on_top = on;
+        self.actions.push(Action::SetAlwaysOnTop(on));
+        self.save_config();
+    }
+
+    pub fn set_mini(&mut self, on: bool) {
+        // 小さな窓では押せない物(確認の窓・ボタン付きの帯)がある間は入らず、理由を出す
+        if on && !self.mini && (self.dialog.is_some() || self.bands.iter().any(|b| !b.buttons.is_empty())) {
+            self.band(BandKind::Warn, "ボタンのある知らせを閉じてから、ミニ表示にしてください");
+            return;
+        }
+        if self.mini != on {
+            self.mini = on;
+            self.actions.push(Action::SetMini(on));
+        }
+    }
+
+    /// ファイルを選ぶ窓(開く・保存)を出す Job。常に手前の間は、選ぶ窓が本体の下に隠れないよう、
+    /// 結果が来るまで手前を外す(設定は変えない)
+    pub fn job_picker(&mut self, job: Job) {
+        if self.cfg.always_on_top {
+            self.actions.push(Action::SetAlwaysOnTop(false));
+        }
+        self.job(job);
+    }
+
+    /// 選ぶ窓が閉じた。常に手前を戻す
+    fn picker_closed(&mut self) {
+        if self.cfg.always_on_top {
+            self.actions.push(Action::SetAlwaysOnTop(true));
         }
     }
 
@@ -274,6 +343,7 @@ impl State {
         self.snap = snap;
         self.perf.push(&self.snap);
         self.procs.on_snapshot(&self.snap);
+        self.update_slow_down();
         // 終わった物は記録から外す(E-13 の他人が止めた物は記録に無い)
         if self.snap.seq > 0 && !self.snap.rows_stale {
             let before = self.suspended.len();
@@ -425,7 +495,14 @@ impl State {
                 crate::log::warn("replace_restore", "result=failed");
                 self.job(Job::ReplaceStatus);
             }
-            JobResult::PickedFiles { paths } => locks::on_picked(self, paths),
+            JobResult::PickedFiles { paths } => {
+                self.picker_closed();
+                locks::on_picked(self, paths)
+            }
+            JobResult::SaveFilePicked { path } => {
+                self.picker_closed();
+                crate::export::on_picked(self, path)
+            }
         }
     }
 
@@ -616,6 +693,16 @@ impl State {
         crate::palette::consume_keys(self, ui);
         let pal = theme::palette(ui);
 
+        if self.mini {
+            // ミニ表示: 窓の中身はミニの物だけ。確認の窓は出す(出たら mini.rs が普通の表示に戻す)
+            egui::CentralPanel::default_margins().show(ui, |ui| crate::mini::ui(self, ui));
+            dialogs::show(self, ui);
+            self.frame_ms.push(t0.elapsed().as_secs_f32() * 1000.0);
+            if self.frame_ms.len() > 200 {
+                self.frame_ms.remove(0);
+            }
+            return;
+        }
         egui::Panel::top("top").show(ui, |ui| self.top(ui, &pal));
         if !self.bands.is_empty() {
             egui::Panel::top("bands").show(ui, |ui| self.bands_ui(ui, &pal));
@@ -654,6 +741,9 @@ impl State {
         }
         if self.palette.open {
             return;
+        }
+        if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::M)) {
+            self.set_mini(!self.mini);
         }
         let tabs = [Key::Num1, Key::Num2, Key::Num3, Key::Num4];
         for (k, t) in tabs.into_iter().zip(Tab::ALL) {
@@ -694,8 +784,20 @@ impl State {
                     if !self.env.elevated && ui.button("管理者で再起動").clicked() {
                         self.dialog = Some(Dialog::RestartElevated { opened: false });
                     }
+                    if ui.button("一覧を CSV で保存…").clicked() {
+                        crate::export::request(self);
+                    }
                     if ui.button("終了").clicked() {
                         self.request_exit();
+                    }
+                });
+                ui.menu_button("表示", |ui| {
+                    if ui.add(egui::Button::new("ミニ表示").shortcut_text("Ctrl+M")).clicked() {
+                        self.set_mini(true);
+                    }
+                    let mut top = self.cfg.always_on_top;
+                    if ui.checkbox(&mut top, "常に手前に表示").changed() {
+                        self.set_always_on_top(top);
                     }
                 });
                 ui.menu_button("ツール", |ui| {
@@ -803,7 +905,9 @@ impl State {
     pub fn set_interval(&mut self, ms: u64) {
         self.cfg.interval_ms = ms;
         self.perf.clear();
-        self.actions.push(Action::SetInterval(ms));
+        let eff = procsight_core::rules::effective_interval(ms, self.cfg.slow_interval_ms, self.slow.active);
+        self.effective_interval_ms = eff;
+        self.actions.push(Action::SetInterval(eff));
         self.save_config();
     }
 
@@ -903,6 +1007,9 @@ impl State {
                 ui.add_space(10.0);
                 if self.paused {
                     crate::widgets::pill(ui, "更新を止めています", pal.warn);
+                } else if self.slow.active && self.effective_interval_ms != self.cfg.interval_ms {
+                    let text = if wide { format!("ゲーム中のため{}ごとに更新", interval_label(self.effective_interval_ms)) } else { format!("{}ごと", interval_label(self.effective_interval_ms)) };
+                    crate::widgets::pill(ui, text, pal.accent).on_hover_text("触れないプロセスが動いている間は、更新を遅くして軽くしています(設定の「全般」)");
                 } else if wide {
                     ui.label(RichText::new(format!("{}ごとに更新", interval_label(self.cfg.interval_ms))).color(pal.weak));
                 }

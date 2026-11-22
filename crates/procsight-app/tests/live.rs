@@ -37,7 +37,7 @@ fn pump(b: &Backend, st: &mut State) {
             Action::Job(j) => b.submit(j),
             Action::SetInterval(ms) => b.set_interval(ms),
             Action::SetPaused(p) => b.set_paused(p),
-            Action::SetTouchFree(_) | Action::SetTiming(_) | Action::Exit | Action::TrayChanged => {}
+            Action::SetTouchFree(_) | Action::SetTiming(_) | Action::Exit | Action::TrayChanged | Action::SetAlwaysOnTop(_) | Action::SetMini(_) => {}
         }
     }
 }

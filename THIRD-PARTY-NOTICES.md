@@ -2828,12 +2828,12 @@ SOFTWARE.
 
 Used by:
 
-- procsight-app 0.2.0
-- procsight-core 0.2.0
-- procsight-probe 0.2.0
-- procsight-testee 0.2.0
-- procsight-uiprobe 0.2.0
-- procsight-win 0.2.0
+- procsight-app 0.3.0
+- procsight-core 0.3.0
+- procsight-probe 0.3.0
+- procsight-testee 0.3.0
+- procsight-uiprobe 0.3.0
+- procsight-win 0.3.0
 - accesskit 0.25.2
 - accesskit_consumer 0.39.2
 - accesskit_windows 0.35.2

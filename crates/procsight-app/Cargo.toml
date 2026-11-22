@@ -12,8 +12,8 @@ name = "ProcSight"
 path = "src/main.rs"
 
 [dependencies]
-procsight-core = { version = "0.2.0", path = "../procsight-core" }
-procsight-win = { version = "0.2.0", path = "../procsight-win" }
+procsight-core = { version = "0.3.0", path = "../procsight-core" }
+procsight-win = { version = "0.3.0", path = "../procsight-win" }
 # 既定の機能を切る: default_fonts(OFL-1.1・Ubuntu-font-1.0)と clipboard(arboard → BSL-1.0)が INV-11 の外。
 # フォントは Windows の物を読み(D-29)、クリップボードは procsight-win の Win32 で行う
 eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "system_fonts", "wgpu"] }

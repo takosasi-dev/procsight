@@ -321,6 +321,8 @@ pub enum Job {
     ReplaceRestore { value: String },
     /// ファイルを選ぶ窓(IFileOpenDialog、複数選択。FR-35)
     PickFiles,
+    /// 保存先を選ぶ窓(IFileSaveDialog)。suggested は最初に出すファイル名(v0.3.0。一覧の CSV)
+    PickSaveFile { suggested: String },
 }
 
 #[derive(Clone, Debug)]
@@ -351,4 +353,6 @@ pub enum JobResult {
     ReplaceRestoreFailed { saved: String },
     ReplaceRestored { result: Result<(), OpError> },
     PickedFiles { paths: Vec<String> },
+    /// やめたら None
+    SaveFilePicked { path: Option<String> },
 }

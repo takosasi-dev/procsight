@@ -21,5 +21,5 @@ features = [
 
 # 結合テスト(tests/)は testee を起動して procsight-win を確かめる。CARGO_BIN_EXE_procsight-testee はこの crate でだけ使える
 [dev-dependencies]
-procsight-core = { version = "0.2.0", path = "../procsight-core" }
-procsight-win = { version = "0.2.0", path = "../procsight-win" }
+procsight-core = { version = "0.3.0", path = "../procsight-core" }
+procsight-win = { version = "0.3.0", path = "../procsight-win" }

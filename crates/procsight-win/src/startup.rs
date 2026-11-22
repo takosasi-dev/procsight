@@ -136,20 +136,21 @@ const RUN: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const RUN32: &str = "Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run";
 const APPROVED: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved";
 
-/// その場所の有効・無効を覚えるキー(根、パス)
-fn approved_key(loc: StartupLocation) -> (HKEY, String) {
+/// その場所の有効・無効を覚えるキー(根、パス)。タスクとストア アプリは StartupApproved を使わないので None
+fn approved_key(loc: StartupLocation) -> Option<(HKEY, String)> {
     let (root, sub) = match loc {
         StartupLocation::RegistryUser => (HKEY_CURRENT_USER, "Run"),
         StartupLocation::RegistryMachine => (HKEY_LOCAL_MACHINE, "Run"),
         StartupLocation::Registry32 => (HKEY_LOCAL_MACHINE, "Run32"),
         StartupLocation::FolderUser => (HKEY_CURRENT_USER, "StartupFolder"),
         StartupLocation::FolderCommon => (HKEY_LOCAL_MACHINE, "StartupFolder"),
+        StartupLocation::ScheduledTask | StartupLocation::StoreApp => return None,
     };
-    (root, format!("{APPROVED}\\{sub}"))
+    Some((root, format!("{APPROVED}\\{sub}")))
 }
 
 fn approved_values(loc: StartupLocation) -> HashMap<String, Vec<u8>> {
-    let (root, path) = approved_key(loc);
+    let Some((root, path)) = approved_key(loc) else { return HashMap::new() };
     let Ok(k) = open_key(root, &path, KEY_READ | KEY_WOW64_64KEY) else { return HashMap::new() };
     enum_values(&k).into_iter().map(|(n, _, d)| (n.to_lowercase(), d)).collect()
 }
@@ -189,7 +190,7 @@ fn make_item(
         }
         _ => None,
     };
-    StartupItem { name, location, command, exe_path, exe_exists, approved: decode_approved(approved), publisher }
+    StartupItem { name, location, command, exe_path, exe_exists, approved: decode_approved(approved), publisher, readonly_reason: None }
 }
 
 /// .lnk の指す先と引数(IShellLinkW。指す先は解決しない)
@@ -268,12 +269,19 @@ pub fn load(sig: &SignatureCache, touch_free_names: &[String]) -> Result<Vec<Sta
             items.push(make_item(name, loc, command, exe, a, sig, touch_free_names));
         }
     }
+    // v0.3.0: タスク スケジューラ(ログオン時・起動時)とストア アプリ(読むだけ)
+    items.extend(crate::startup_tasks::list(sig, touch_free_names));
+    items.extend(crate::startup_store::list());
     Ok(items)
 }
 
 pub fn set(name: &str, location: StartupLocation, enabled: bool) -> Result<(), OpError> {
     use windows::Win32::System::Registry::{KEY_QUERY_VALUE, KEY_SET_VALUE};
-    let (root, path) = approved_key(location);
+    let (root, path) = match location {
+        StartupLocation::ScheduledTask => return crate::startup_tasks::set(name, enabled),
+        StartupLocation::StoreApp => return crate::startup_store::set(name, enabled),
+        _ => approved_key(location).ok_or(OpError::Blocked("この項目は切り替えられません"))?,
+    };
     let k = create_key(root, &path, KEY_SET_VALUE | KEY_QUERY_VALUE | KEY_WOW64_64KEY).map_err(OpError::from_code)?;
     // E-30: 形の分からない値は書き換えない
     let current = read_value(&k, name).map_err(OpError::from_code)?;
@@ -289,11 +297,13 @@ mod tests {
 
     #[test]
     fn approved_keys_match_task_manager() {
-        assert_eq!(approved_key(StartupLocation::RegistryUser).1, format!("{APPROVED}\\Run"));
-        assert_eq!(approved_key(StartupLocation::Registry32).1, format!("{APPROVED}\\Run32"));
-        assert_eq!(approved_key(StartupLocation::FolderCommon).1, format!("{APPROVED}\\StartupFolder"));
-        assert_eq!(approved_key(StartupLocation::FolderUser).0, HKEY_CURRENT_USER);
-        assert_eq!(approved_key(StartupLocation::RegistryMachine).0, HKEY_LOCAL_MACHINE);
+        let k = |l| approved_key(l).unwrap();
+        assert_eq!(k(StartupLocation::RegistryUser).1, format!("{APPROVED}\\Run"));
+        assert_eq!(k(StartupLocation::Registry32).1, format!("{APPROVED}\\Run32"));
+        assert_eq!(k(StartupLocation::FolderCommon).1, format!("{APPROVED}\\StartupFolder"));
+        assert_eq!(k(StartupLocation::FolderUser).0, HKEY_CURRENT_USER);
+        assert_eq!(k(StartupLocation::RegistryMachine).0, HKEY_LOCAL_MACHINE);
+        assert!(approved_key(StartupLocation::ScheduledTask).is_none() && approved_key(StartupLocation::StoreApp).is_none());
         assert_eq!(reg_string(&reg_string_bytes("a\\b")), "a\\b");
         assert!(locate("cmd").to_lowercase().ends_with("\\system32\\cmd.exe"));
     }

@@ -316,3 +316,190 @@ fn delete_on_core_process_only_shows_reason() {
     assert!(h.state().bands.iter().any(|b| b.text.contains("中核のプロセス") || b.text.contains("確かめられない")));
     assert!(jobs(h.state()).is_empty());
 }
+
+// ---------------------------------------------------------------- v0.3.0: CPU の推移の列と CSV の保存(担当 F)
+
+/// CPU の推移の列が見える形(一覧・CPU の順。動きのある browser.exe を選ぶ)。
+/// 見本の CPU は周ごとの揺れが小さいので、さらに 60 回分、行ごとに形の違う動き(波・山・上り)を足す
+fn cpu_history_state() -> State {
+    let mut st = demo::state();
+    for seq in 61..=120u64 {
+        let mut s = demo::snapshot(seq);
+        let t = (seq - 61) as f32;
+        for r in s.rows.iter_mut().filter(|r| r.id.pid != 0) {
+            let Some(c) = r.cpu_pct.as_mut() else { continue };
+            *c = match r.name.as_str() {
+                "AceGame.exe" => 30.0 + 25.0 * (t * 0.25).sin() + 10.0 * (t * 0.9).sin(),
+                "procsight-testee.exe" if r.id.pid == 10_000 => (t * 1.6).min(96.0),
+                "browser.exe" if r.id.pid == 8812 => if (20..28).contains(&(seq % 40)) { 45.0 } else { 3.0 + (t * 0.7).sin().abs() * 2.0 },
+                "dwm.exe" => 2.0 + 1.5 * (t * 0.5).sin(),
+                "svchost.exe" if seq % 15 == 0 => *c + 18.0,
+                _ => *c,
+            }
+            .max(0.0);
+        }
+        st.set_snapshot(Arc::new(s));
+    }
+    st.cfg.view = procsight_core::config::View::Flat;
+    let id = target(&st, "browser.exe").id;
+    st.procs.select_only(id);
+    st
+}
+
+#[test]
+fn s1_cpu_history_looks() {
+    shoot("s1-cpu-history", BIG, cpu_history_state);
+    shoot_stress("s1-cpu-history", cpu_history_state);
+    // 触れないプロセスの行を選んでも描く(SPI の値)
+    shoot("s1-cpu-history-touch-free", BIG, || {
+        let mut st = cpu_history_state();
+        let id = target(&st, "AceGame.exe").id;
+        st.procs.select_only(id);
+        st
+    });
+    // System Idle Process(一番下)は使用量の色にしない。名前で絞って見えるところへ
+    shoot("s1-cpu-history-idle", BIG, || {
+        let mut st = cpu_history_state();
+        st.procs.filter = "system".into();
+        st
+    });
+    // 塗り(heat)を切ったときと、行の高さが一番低いとき
+    shoot("s1-cpu-history-compact-heat-off", BIG, || {
+        let mut st = cpu_history_state();
+        st.cfg.heat_map = false;
+        st.cfg.density = procsight_core::config::Density::Compact;
+        st
+    });
+}
+
+/// 推移は Snapshot の seq が変わったときだけ進み、終わった・消えた識別子は消える。最小化中の周は触らない
+#[test]
+fn cpu_history_follows_snapshots() {
+    let mut st = demo::state();
+    let browser = target(&st, "browser.exe").id;
+    let game = target(&st, "AceGame.exe").id;
+    let hist = |st: &State, id| st.procs.cpu_history(id).map(|h| h.collect::<Vec<f32>>());
+    let h = hist(&st, browser).unwrap();
+    let game_before = hist(&st, game).unwrap();
+    assert_eq!(h.len(), 60, "見本は 60 回分");
+    assert_eq!(h.last().copied(), st.snap.find(browser).unwrap().cpu_pct);
+    assert_eq!(game_before.len(), 60, "触れないプロセスも持つ");
+    // 終わった行(is_gone)の推移は持たない
+    assert!(hist(&st, target(&st, "updater.exe").id).is_none());
+    // 同じ seq は足さない
+    st.set_snapshot(Arc::new(demo::snapshot(60)));
+    assert_eq!(hist(&st, browser).unwrap(), h);
+    // 最小化中の周(rows_stale)は足しも消しもしない
+    let mut stale = demo::snapshot(61);
+    stale.rows.clear();
+    stale.rows_stale = true;
+    st.procs.on_snapshot(&stale);
+    assert_eq!(hist(&st, browser).unwrap(), h);
+    // 一覧から消えた識別子は消える。60 回を超えたら古い方から落ちる
+    let mut next = demo::snapshot(62);
+    next.rows.retain(|r| r.id != browser);
+    let game_now = next.find(game).unwrap().cpu_pct.unwrap();
+    st.set_snapshot(Arc::new(next));
+    assert!(hist(&st, browser).is_none());
+    let g = hist(&st, game).unwrap();
+    assert_eq!(g.len(), 60);
+    assert_eq!(g[..59], game_before[1..]);
+    assert_eq!(g[59], game_now);
+    assert_eq!(st.procs.cpu_history_len(), st.snap.rows.iter().filter(|r| r.is_gone == 0).count());
+}
+
+/// 折れ線にマウスを置くと今・最大・平均が出る。折れ線の上を押しても行が選べる
+#[test]
+fn cpu_history_tooltip_and_click_selects_row() {
+    for dark in [true, false] {
+        let mut h = harness(cpu_history_state(), dark, BIG);
+        h.run_steps(3);
+        let x = h.get_by_label("CPU の推移").rect().center().x;
+        let y = h.get_all_by_label("AceGame.exe").map(|n| n.rect().center().y).fold(f32::MAX, f32::min);
+        let pos = egui::pos2(x, y);
+        h.hover_at(pos);
+        h.run_steps(3);
+        save(&mut h, &format!("s1-cpu-history-tooltip-{}", if dark { "dark" } else { "light" }));
+        assert!(h.query_by_label_contains("CPU の推移(直近 60 回)").is_some(), "ツールチップが出る");
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+            h.run_steps(1);
+        }
+        h.run_steps(2);
+        let s = h.state();
+        assert_eq!(s.procs.single(), Some(target(s, "AceGame.exe").id), "押した行が選ばれる");
+    }
+}
+
+/// CPU の推移の見出しを初めて押すと、大きい順(今の CPU)に並ぶ
+#[test]
+fn cpu_history_header_sorts_descending_first() {
+    let mut h = harness(demo::state(), true, BIG);
+    h.run_steps(2);
+    h.get_by_label("CPU の推移").click();
+    h.run_steps(2);
+    let s = &h.state().cfg.columns.sort;
+    assert_eq!((s.column.as_str(), s.descending), ("cpu_history", true));
+}
+
+/// 1,000 行の全部が 60 回分の推移を持つとき(一番重い形)の 1 フレームの目安
+#[test]
+fn s1_thousand_rows_with_history() {
+    let mut st = demo::state();
+    for seq in 61..=120 {
+        let mut s = demo::big_snapshot(1000);
+        s.seq = seq;
+        st.set_snapshot(Arc::new(s));
+    }
+    let id = st.snap.rows[600].id;
+    assert_eq!(st.procs.cpu_history(id).unwrap().len(), 60);
+    let mut h = harness(st, true, BIG);
+    h.run_steps(13);
+    save(&mut h, "s1-1000-rows-history-dark");
+    let mut v: Vec<f32> = h.state().frame_ms.iter().rev().take(10).copied().collect();
+    v.sort_by(|a, b| a.total_cmp(b));
+    println!("1,000 行(全部に推移)の 1 フレーム(debug)の中央値: {:.1} ms", v[v.len() / 2]);
+}
+
+/// 「一覧を CSV で保存…」は保存先を選ぶ Job を積むだけ(本物の保存の窓はテストで出さない)
+#[test]
+fn csv_request_queues_pick_save_file() {
+    let mut st = demo::state();
+    procsight_app::export::request(&mut st);
+    let js = jobs(&st);
+    assert_eq!(js.len(), 1);
+    let Job::PickSaveFile { suggested } = js[0] else { panic!("{:?}", js[0]) };
+    assert!(suggested.starts_with("procsight-") && suggested.ends_with(".csv"), "{suggested}");
+    assert_eq!(suggested.len(), "procsight-YYYYMMDD-HHMMSS.csv".len(), "{suggested}");
+}
+
+/// やめたら何も起きない。選んだら書いて成功の帯。書けなければ失敗の帯
+#[test]
+fn csv_on_picked_writes_file_and_shows_band() {
+    let mut st = demo::state();
+    procsight_app::export::on_picked(&mut st, None);
+    assert!(st.bands.is_empty() && st.actions.is_empty());
+
+    let dir = std::env::temp_dir().join(format!("procsight-f-csv-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("list.csv");
+    procsight_app::export::on_picked(&mut st, Some(path.to_string_lossy().into_owned()));
+    let bytes = std::fs::read(&path);
+    std::fs::remove_dir_all(&dir).unwrap();
+    let bytes = bytes.unwrap();
+    let n = st.procs.visible.len();
+    assert!(n > 20, "表を描く前でも、見えている行を作ってから書く");
+    assert!(bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
+    let text = String::from_utf8(bytes).unwrap();
+    assert_eq!(text.matches("\r\n").count(), n + 1, "見出し + {n} 行");
+    assert!(text.contains("\"notepad.exe\""));
+    let b = &st.bands[0];
+    assert_eq!((b.kind, b.text.as_str()), (BandKind::Ok, format!("一覧を CSV で保存しました({n} 行)").as_str()));
+
+    // 無いフォルダには書けない
+    let bad = std::env::temp_dir().join(format!("procsight-f-missing-{}", std::process::id())).join("x.csv");
+    procsight_app::export::on_picked(&mut st, Some(bad.to_string_lossy().into_owned()));
+    let b = &st.bands[0];
+    assert_eq!(b.kind, BandKind::Danger);
+    assert!(b.text.starts_with("CSV を保存できませんでした。"), "{}", b.text);
+}

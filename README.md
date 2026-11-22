@@ -13,17 +13,21 @@ A process manager for Windows 11 that replaces the built-in Task Manager. It is 
   - Filter syntax: combine `cpu>5`, `mem>1gb`, `gpu>10`, `io>1mb`, `pid:1234`, `user:system`, `state:hung` and plain words
   - System Idle Process always sorts to the bottom
   - Row height (compact, normal, comfortable)
+  - "CPU の推移" (CPU history) column: a small graph of the last 60 samples per process
+  - Save the list as CSV (opens in Excel; values that look like formulas are neutralised)
 - **Actions**: end process, end process tree, end several at once, priority (Idle to High), CPU affinity, efficiency mode, suspend and resume, bring to front, open file location, properties
 - **Details**: general (path, command line, parent, user, elevation, integrity level, architecture), threads, DLLs, handles, signature (verified without network access), small CPU and memory graphs
 - **Find what locks a file**: drop a file that "is in use" to see which processes hold it
 - **Performance**: CPU (total and per logical processor), memory, disks, network adapters and GPUs (last 60 samples)
   - CPU topology (sockets, cores, logical processors, L1 to L3 cache) and memory breakdown (cached, paged pool, non-paged pool)
   - Top 5 processes using the selected resource; click one to jump to it on the Processes tab
+- **Mini view** (Ctrl+M): a small window with only CPU, memory, GPU, disk and network. Combine it with "always on top" to keep it next to a game or on another monitor
+- **Slower updates while gaming** (off by default): while a touch-free process runs, ProcSight updates less often to stay light
 - **Command palette** (Ctrl+K): find tabs, actions, processes and services by part of their name. **Keyboard shortcut list** with F1
-- **Startup**: enable or disable registry Run entries and startup folder items, recorded the same way Task Manager does, so both tools show the same state
+- **Startup**: enable or disable registry Run entries and startup folder items, recorded the same way Task Manager does, so both tools show the same state. Logon and boot tasks in Task Scheduler (enable or disable) and Store app startup tasks (view only) are listed too
 - **Services**: start, stop, restart and change the start type; running dependent services are listed before stopping
 - **Replace Task Manager** (off by default): open ProcSight with Ctrl+Shift+Esc and from the Ctrl+Alt+Del screen
-- Dark and light themes, font size, optional tray icon with CPU usage, keyboard shortcuts (Delete, Ctrl+F, Ctrl+1 to Ctrl+4, Ctrl+C, Ctrl+K, F1)
+- Dark and light themes, font size, optional tray icon with CPU usage, keyboard shortcuts (Delete, Ctrl+F, Ctrl+1 to Ctrl+4, Ctrl+C, Ctrl+K, Ctrl+M, F1)
 
 ![CPU graphs](docs/images/s2-cpu-cores-dark.png)
 
@@ -31,10 +35,12 @@ A process manager for Windows 11 that replaces the built-in Task Manager. It is 
 
 ![Command palette](docs/images/palette-note-dark.png)
 
+![Mini view](docs/images/mini-dark.png)
+
 ## What ProcSight does not do
 
 - **No network access at all**: no update checks, telemetry, online lookups or certificate revocation checks.
-- **No history**: graphs keep only the last 60 samples in memory.
+- **No history**: graphs and the per-process "CPU の推移" (CPU history) column keep only the last 60 samples in memory, and the history of an exited process is dropped at once.
 - **Critical processes cannot be ended or suspended**: Windows core processes (System, csrss.exe, lsass.exe and others), processes marked critical, and ProcSight itself.
 - No realtime priority, dumps, closing other processes' handles, or reading and writing other processes' memory.
 
@@ -110,7 +116,7 @@ UI tests render without creating a window (egui_kittest). `procsight-testee` is 
 
 ## Status
 
-v0.2.0 is a pre-release. The UI is verified with windowless rendering tests, but not yet by hands-on use. The automated tests (about 170) and checks with standard user rights pass. Administrator operations (services, all-users startup items, replacing Task Manager) and comparisons with Task Manager's numbers are still waiting for hands-on verification.
+v0.3.0 is a pre-release. The UI is verified with windowless rendering tests, but not yet by hands-on use. The automated tests (about 210) and checks with standard user rights pass. Administrator operations (services, all-users startup items, replacing Task Manager) and comparisons with Task Manager's numbers are still waiting for hands-on verification.
 
 ## License
 

@@ -211,9 +211,61 @@ pub fn collect_tree_for_terminate(
     (kill, excluded)
 }
 
+/// 触れないプロセスが居なくなってから、遅い更新を元に戻すまで待つ時間。ランチャーの出入りで行ったり来たりしない
+pub const SLOW_HOLD_MS: u64 = 30_000;
+
+/// ゲーム中(触れないプロセスが動いている間)に更新を遅くするかの判定(v0.3.0)。更新ごとに `update` を呼ぶ
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SlowDown {
+    /// 今遅くしている
+    pub active: bool,
+    /// 触れないプロセスが見えなくなった時刻(ミリ秒)。また見えたら None
+    gone_since_ms: Option<u64>,
+}
+
+impl SlowDown {
+    /// enabled: 設定がオン、running: 触れないプロセスが 1 つ以上動いている、now_ms: 単調な時刻。戻りは今遅くしているか
+    pub fn update(&mut self, enabled: bool, running: bool, now_ms: u64) -> bool {
+        if !enabled {
+            *self = SlowDown::default();
+        } else if running {
+            self.active = true;
+            self.gone_since_ms = None;
+        } else if self.active {
+            let since = *self.gone_since_ms.get_or_insert(now_ms);
+            if now_ms.saturating_sub(since) >= SLOW_HOLD_MS {
+                *self = SlowDown::default();
+            }
+        }
+        self.active
+    }
+}
+
+/// Backend に渡す更新間隔。遅くしている間は、利用者が選んだ間隔と遅い間隔の長い方
+pub fn effective_interval(chosen_ms: u64, slow_ms: u64, active: bool) -> u64 {
+    if active { chosen_ms.max(slow_ms) } else { chosen_ms }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_down_starts_at_once_and_ends_after_hold() {
+        let mut s = SlowDown::default();
+        assert!(!s.update(true, false, 0), "居なければ遅くしない");
+        assert!(s.update(true, true, 1_000), "見えたらすぐ遅くする");
+        assert!(s.update(true, false, 2_000), "居なくなってすぐは戻さない");
+        assert!(s.update(true, true, 10_000), "また見えたら待ちをやり直す");
+        assert!(s.update(true, false, 11_000));
+        assert!(s.update(true, false, 11_000 + SLOW_HOLD_MS - 1));
+        assert!(!s.update(true, false, 11_000 + SLOW_HOLD_MS), "待ちが過ぎたら戻す");
+        assert!(s.update(true, true, 50_000));
+        assert!(!s.update(false, true, 50_001), "設定をオフにしたらすぐ戻す");
+        assert_eq!(effective_interval(1000, 2000, true), 2000);
+        assert_eq!(effective_interval(4000, 2000, true), 4000, "利用者がもっと遅くしていればそのまま");
+        assert_eq!(effective_interval(1000, 2000, false), 1000);
+    }
     use crate::diff::tests::proc_;
     use std::sync::Arc;
 

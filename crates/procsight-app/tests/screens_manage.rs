@@ -256,3 +256,101 @@ fn settings_density_and_heat_map_save() {
     assert_eq!(h.state().cfg.heat_map, !heat_before);
     assert!(h.state().config_dirty);
 }
+
+// ---- v0.3.0: タスク スケジューラとストア アプリのスタートアップ(担当 G) ----
+
+fn startup_selected(name: &str, loc: procsight_core::startup::StartupLocation) -> State {
+    let mut st = with_tab(Tab::Startup);
+    st.startup.selected = Some((name.into(), loc));
+    st
+}
+
+/// ボタンが灰色(押せない)か
+fn disabled(h: &Harness<'static, State>, label: &str) -> bool {
+    use egui_kittest::kittest::NodeT;
+    h.get_by_label(label).accesskit_node().is_disabled()
+}
+
+fn startup_filtered(f: procsight_app::startup_view::LocFilter) -> State {
+    let mut st = with_tab(Tab::Startup);
+    st.startup.loc_filter = f;
+    st
+}
+
+/// demo の新しい 2 行(タスク・ストア アプリ)が場所の列に出る。ストア アプリの行を選ぶとボタンが灰色。場所での絞り込み
+#[test]
+fn s3_startup_tasks_and_store() {
+    use procsight_app::startup_view::LocFilter;
+    use procsight_core::startup::StartupLocation;
+    shoot("s3-startup-store-selected", BIG, || startup_selected("Example Notes", StartupLocation::StoreApp));
+    shoot("s3-startup-task-selected", [900.0, 400.0], || startup_selected("\\Example\\UpdaterLogon", StartupLocation::ScheduledTask));
+    shoot("s3-startup-filter-task", [900.0, 400.0], || startup_filtered(LocFilter::Task));
+    shoot("s3-startup-filter-store", [900.0, 400.0], || startup_filtered(LocFilter::Store));
+    // 絞り込みで 0 件になった時(demo の一覧からフォルダの行を抜く)
+    shoot("s3-startup-filter-empty", [900.0, 400.0], || {
+        let mut st = startup_filtered(LocFilter::Folder);
+        if let Load::Ready(v) = &mut st.startup.items {
+            v.retain(|i| !LocFilter::Folder.matches(i.location));
+        }
+        st
+    });
+    // タスクの切り替えに断られた時(権限)。今の失敗の帯の形で「管理者で再起動」が付く
+    shoot("s3-startup-task-denied", [900.0, 400.0], || {
+        let mut st = startup_selected("\\Example\\UpdaterLogon", StartupLocation::ScheduledTask);
+        procsight_app::startup_view::on_set(&mut st, "\\Example\\UpdaterLogon".into(), false, Err(OpError::Win32(5)));
+        st
+    });
+    shoot_stress("s3-startup-store-selected", || startup_selected("Example Notes", StartupLocation::StoreApp));
+}
+
+/// ストア アプリの行を選んだら、有効にする・無効にするは灰色で、押しても Job::SetStartup が積まれない。マウスを置くと理由が出る
+#[test]
+fn s3_store_row_is_read_only() {
+    use procsight_core::startup::StartupLocation;
+    let mut h = harness(startup_selected("Example Notes", StartupLocation::StoreApp), true, BIG);
+    h.run_steps(2);
+    h.state_mut().actions.clear();
+    for label in ["有効にする", "無効にする", "ファイルの場所を開く"] {
+        assert!(disabled(&h, label), "{label} が灰色でない");
+        h.get_by_label(label).click();
+        h.run_steps(2);
+    }
+    assert!(jobs(h.state()).iter().all(|j| !matches!(j, Job::SetStartup { .. } | Job::OpenLocation { .. })), "{:?}", jobs(h.state()));
+    // マウスを置くと readonly_reason(灰色のボタンの説明)
+    h.get_by_label("無効にする").hover();
+    h.run_steps(40);
+    assert!(h.query_all_by_label(procsight_win::startup_store::READONLY_REASON).next().is_some(), "理由が出ない");
+
+    // 比べ: タスクの行(有効)は「無効にする」が押せて、SetStartup が積まれる(Worker へは渡さない)
+    let mut h = harness(startup_selected("\\Example\\UpdaterLogon", StartupLocation::ScheduledTask), true, BIG);
+    h.run_steps(2);
+    h.state_mut().actions.clear();
+    assert!(disabled(&h, "有効にする"), "すでに有効");
+    assert!(!disabled(&h, "無効にする"));
+    h.get_by_label("無効にする").click();
+    h.run_steps(2);
+    assert!(jobs(h.state()).iter().any(|j| matches!(j, Job::SetStartup { location: StartupLocation::ScheduledTask, enabled: false, .. })));
+}
+
+/// 場所の絞り込み: 隠れた行の選択ではボタンが効かず、件数の札に新しい場所が数えられる
+#[test]
+fn s3_location_filter() {
+    use procsight_app::startup_view::LocFilter;
+    use procsight_core::startup::StartupLocation;
+    let mut st = startup_selected("CloudSync", StartupLocation::RegistryUser);
+    st.startup.loc_filter = LocFilter::Store;
+    let mut h = harness(st, true, BIG);
+    h.run_steps(2);
+    h.state_mut().actions.clear();
+    assert!(disabled(&h, "無効にする"), "隠れた行の選択で押せる");
+    h.get_by_label("無効にする").click();
+    h.run_steps(2);
+    assert!(jobs(h.state()).is_empty());
+    for label in ["すべて 5", "レジストリ 2", "フォルダ 1", "タスク 1", "ストア アプリ 1"] {
+        assert!(h.query_by_label(label).is_some(), "{label} が無い");
+    }
+    h.get_by_label("タスク 1").click();
+    h.run_steps(2);
+    assert_eq!(h.state().startup.loc_filter, LocFilter::Task);
+    assert!(h.query_by_label("\\Example\\UpdaterLogon").is_some() && h.query_by_label("CloudSync").is_none());
+}

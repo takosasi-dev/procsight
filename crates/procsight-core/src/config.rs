@@ -104,11 +104,12 @@ pub struct Columns {
     pub sort: SortSetting,
 }
 
-pub const DEFAULT_COLUMNS: [Column; 9] = [
+pub const DEFAULT_COLUMNS: [Column; 10] = [
     Column::Name,
     Column::Pid,
     Column::State,
     Column::Cpu,
+    Column::CpuHistory,
     Column::Mem,
     Column::IoRead,
     Column::IoWrite,
@@ -182,6 +183,11 @@ pub struct Config {
     pub heat_map: bool,
     /// 表の行の高さ(v0.2.0)
     pub density: Density,
+    /// 窓を常に手前に出す(v0.3.0。既定オフ)
+    pub always_on_top: bool,
+    /// 触れないプロセスが動いている間は、更新を slow_interval_ms まで遅くする(v0.3.0。既定オフ)
+    pub slow_when_touch_free: bool,
+    pub slow_interval_ms: u64,
 }
 
 impl Default for Config {
@@ -202,6 +208,9 @@ impl Default for Config {
             window: WindowPlacement::default(),
             heat_map: true,
             density: Density::Normal,
+            always_on_top: false,
+            slow_when_touch_free: false,
+            slow_interval_ms: 2000,
         }
     }
 }
@@ -235,6 +244,10 @@ impl Config {
         if !INTERVALS_MS.contains(&self.interval_ms) {
             w.push(format!("interval_ms={} を {} に戻しました", self.interval_ms, d.interval_ms));
             self.interval_ms = d.interval_ms;
+        }
+        if !INTERVALS_MS.contains(&self.slow_interval_ms) {
+            w.push(format!("slow_interval_ms={} を {} に戻しました", self.slow_interval_ms, d.slow_interval_ms));
+            self.slow_interval_ms = d.slow_interval_ms;
         }
         if !(0.8..=1.6).contains(&self.font_scale) || !self.font_scale.is_finite() {
             w.push(format!("font_scale={} を 1.0 に戻しました", self.font_scale));
@@ -333,6 +346,9 @@ maximized = false
         assert_eq!(c.touch_free.names, vec!["acegame.exe".to_string()]);
         assert!(c.heat_map);
         assert_eq!(c.density, Density::Normal);
+        // v0.3.0 の項目も既定(既定では v0.2.0 と同じ動き)
+        assert!(!c.always_on_top && !c.slow_when_touch_free);
+        assert_eq!(c.slow_interval_ms, 2000);
         // 書き戻して読み直しても同じ
         let again = Config::parse(&toml::to_string(&c).unwrap()).unwrap().0;
         assert_eq!(again, c);

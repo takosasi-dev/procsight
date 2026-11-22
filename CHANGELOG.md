@@ -3,6 +3,23 @@
 All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-22
+
+Pre-release. The new screens are verified with windowless rendering tests only; the mini view, always on top, the save dialog and toggling scheduled tasks need hands-on checks.
+
+### Added
+
+- Mini view (Ctrl+M, menu 表示): CPU, memory, GPU, disk and network in a small window; returns to the normal view when a confirmation is needed
+- Always on top (menu 表示 and settings; off by default)
+- Slower updates while a touch-free process runs (settings; off by default). Returns to the chosen interval 30 seconds after the last touch-free process exits
+- "CPU の推移" column with the last 60 CPU samples per process (memory only)
+- Save the visible process list as CSV (UTF-8 with BOM, CRLF, formula-like values neutralised)
+- Startup tab: logon and boot tasks from Task Scheduler (enable and disable through the Task Scheduler API; tasks under \Microsoft\ are not listed) and Store app startup tasks (view only), with a location filter
+
+### Fixed
+
+- The window could shrink or grow on every start when the font size was not 100%
+
 ## [0.2.0] - 2026-11-22
 
 Pre-release. The new screens are verified with windowless rendering tests only.
@@ -37,5 +54,6 @@ Pre-release. Administrator operations, replacing Task Manager and comparisons wi
 - Optional replacement of Task Manager for Ctrl+Shift+Esc, with `restore-taskmgr.reg`
 - Settings, diagnostics, about window, tray icon, single instance, restart as administrator, dark and light themes
 
+[0.3.0]: https://github.com/takosasi-dev/procsight/releases/tag/v0.3.0
 [0.2.0]: https://github.com/takosasi-dev/procsight/releases/tag/v0.2.0
 [0.1.0]: https://github.com/takosasi-dev/procsight/releases/tag/v0.1.0

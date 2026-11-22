@@ -113,7 +113,7 @@ pub fn window(st: &mut State, ui: &mut Ui) {
             ui.horizontal_wrapped(|ui| {
                 ui.label("ここにファイルをドロップするか、");
                 if ui.button("ファイルを選ぶ…").clicked() {
-                    st.job(Job::PickFiles);
+                    st.job_picker(Job::PickFiles);
                 }
             });
             if let Some(p) = st.locks.problem {

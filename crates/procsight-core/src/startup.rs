@@ -10,6 +10,10 @@ pub enum StartupLocation {
     Registry32,
     FolderUser,
     FolderCommon,
+    /// タスク スケジューラのログオン時・起動時のタスク(v0.3.0)
+    ScheduledTask,
+    /// ストア アプリの StartupTask(v0.3.0。読むだけ)
+    StoreApp,
 }
 
 impl StartupLocation {
@@ -20,11 +24,13 @@ impl StartupLocation {
             StartupLocation::Registry32 => "レジストリ(32 ビット)",
             StartupLocation::FolderUser => "スタートアップ フォルダ(ユーザー)",
             StartupLocation::FolderCommon => "スタートアップ フォルダ(全ユーザー)",
+            StartupLocation::ScheduledTask => "タスク スケジューラ",
+            StartupLocation::StoreApp => "ストア アプリ",
         }
     }
-    /// 変えるのに管理者が要る場所(FR-39)
+    /// 変えるのに管理者が要る場所(FR-39)。タスクはタスクごとに違うので、断られたら失敗の帯で知らせる
     pub fn needs_admin(self) -> bool {
-        !matches!(self, StartupLocation::RegistryUser | StartupLocation::FolderUser)
+        !matches!(self, StartupLocation::RegistryUser | StartupLocation::FolderUser | StartupLocation::ScheduledTask | StartupLocation::StoreApp)
     }
 }
 
@@ -87,6 +93,8 @@ pub struct StartupItem {
     pub approved: Approved,
     /// 署名者(D-23)。exe が分からない・触れないプロセスの名前なら None(「—」)
     pub publisher: Option<String>,
+    /// 切り替えられない理由(ストア アプリなど)。None なら切り替えられる(v0.3.0)
+    pub readonly_reason: Option<&'static str>,
 }
 
 /// コマンドから exe のパスを取り出す。引用符で囲まれていればその中、無ければ「.exe」までか最初の空白まで。

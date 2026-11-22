@@ -19,6 +19,8 @@ pub mod services;
 pub mod shell;
 pub mod single_instance;
 pub mod startup;
+pub mod startup_store;
+pub mod startup_tasks;
 pub mod static_info;
 pub mod taskmgr_replace;
 pub mod util;
