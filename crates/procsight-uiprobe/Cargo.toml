@@ -1,0 +1,13 @@
+[package]
+name = "procsight-uiprobe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# 担当 C が足した。procsight-app と同じ crate・同じ版・同じ機能だけ(Cargo.lock に新しい package は入らない)
+[dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "system_fonts", "wgpu"] }
+egui_extras = { version = "0.37.0", default-features = false }
+tray-icon = { version = "0.26.1", default-features = false }

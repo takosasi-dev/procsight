@@ -1,0 +1,26 @@
+# Third-party notices
+
+ProcSight.exe includes the following Rust crates. Their licenses are reproduced below.
+
+## Overview
+
+{{#each overview}}
+- {{name}} ({{count}})
+{{/each}}
+
+## Licenses
+
+{{#each licenses}}
+### {{name}}
+
+Used by:
+
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}
+{{/each}}
+
+```
+{{text}}
+```
+
+{{/each}}

@@ -1,0 +1,10 @@
+# 仕様書 §9.11・INV-1。他のプロセスを開く・窓にメッセージを送る関数は gate.rs と FR-17 の関数の外で使わない
+disallowed-methods = [
+    { path = "windows::Win32::System::Threading::OpenProcess", reason = "ProcessGate::open を使う(INV-1)" },
+    { path = "windows::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot", reason = "ProcessGate::module_snapshot を使う(INV-1)" },
+    { path = "windows::Win32::Foundation::DuplicateHandle", reason = "ProcessGate::duplicate_from を使う(INV-1)" },
+    { path = "windows::Win32::UI::WindowsAndMessaging::SendMessageW", reason = "窓へメッセージを送らない(INV-1)" },
+    { path = "windows::Win32::UI::WindowsAndMessaging::SendMessageTimeoutW", reason = "窓へメッセージを送らない(INV-1)" },
+    { path = "windows::Win32::UI::WindowsAndMessaging::PostMessageW", reason = "窓へメッセージを送らない(INV-1)" },
+    { path = "windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow", reason = "ops::bring_to_front だけで使う(FR-17)" },
+]

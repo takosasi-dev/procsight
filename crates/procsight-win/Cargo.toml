@@ -1,0 +1,49 @@
+[package]
+name = "procsight-win"
+description = "ProcSight の Win32 / NT の呼び出し(unsafe はこの crate だけ)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+procsight-core = { version = "0.1.0", path = "../procsight-core" }
+
+[dependencies.windows]
+version = "0.62.2"
+features = [
+    "Wdk_Foundation",
+    "Wdk_System_SystemInformation",
+    "Wdk_System_Threading",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_WinTrust",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Environment",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Performance",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_RestartManager",
+    "Win32_System_Services",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+]

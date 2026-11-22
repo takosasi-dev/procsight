@@ -1,0 +1,29 @@
+[package]
+name = "procsight-app"
+description = "ProcSight の画面(eframe / egui)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "ProcSight"
+path = "src/main.rs"
+
+[dependencies]
+procsight-core = { version = "0.1.0", path = "../procsight-core" }
+procsight-win = { version = "0.1.0", path = "../procsight-win" }
+# 既定の機能を切る: default_fonts(OFL-1.1・Ubuntu-font-1.0)と clipboard(arboard → BSL-1.0)が INV-11 の外。
+# フォントは Windows の物を読み(D-29)、クリップボードは procsight-win の Win32 で行う
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "system_fonts", "wgpu"] }
+# INV-3・§9.11: http と all_loaders を入れない
+egui_extras = { version = "0.37.0", default-features = false }
+egui_plot = { version = "0.38.0", default-features = false }
+tray-icon = { version = "0.26.1", default-features = false }
+
+[dev-dependencies]
+egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }
+
+[build-dependencies]
+winresource = "0.1.34"
