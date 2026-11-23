@@ -1,122 +1,126 @@
 # ProcSight
 
-English | [日本語](README_ja.md)
+日本語 | [English](README.en.md)
 
-A process manager for Windows 11 that replaces the built-in Task Manager. It is a single exe written in Rust and egui, needs no installer, and has a Japanese user interface.
+Windows 11 の標準のタスク マネージャーの代わりに使う、日本語のプロセス管理ソフトです。Rust と egui で作った 1 つの exe で、インストールは要りません。
 
-![Processes tab](docs/images/s1-processes-dark.png)
+![プロセスのタブ](docs/images/s1-processes-dark.png)
 
-## Features
+## できること
 
-- **Processes**: tree and flat views, sorting, filtering by name, PID or path, configurable columns (shown, order, width; remembered), highlighting of started and exited rows
-  - CPU, memory, I/O and GPU cells shaded by usage, with machine totals in the column headers (can be turned off)
-  - Filter syntax: combine `cpu>5`, `mem>1gb`, `gpu>10`, `io>1mb`, `pid:1234`, `user:system`, `state:hung` and plain words
-  - System Idle Process always sorts to the bottom
-  - Row height (compact, normal, comfortable)
-  - "CPU の推移" (CPU history) column: a small graph of the recent samples per process
-  - Save the list as CSV (opens in Excel; values that look like formulas are neutralised)
-- **Actions**: end process, end process tree, end several at once, priority (Idle to High), CPU affinity, efficiency mode, suspend and resume, bring to front, open file location, properties
-- **Details**: general (path, command line, parent, user, elevation, integrity level, architecture), threads, DLLs, handles, signature (verified without network access), small CPU and memory graphs
-- **Find what locks a file**: drop a file that "is in use" to see which processes hold it
-- **Performance**: CPU (total and per logical processor), memory, disks, network adapters and GPUs (last 60, 120 or 300 samples)
-  - CPU topology (sockets, cores, logical processors, L1 to L3 cache) and memory breakdown (cached, paged pool, non-paged pool)
-  - Top 5 processes using the selected resource; click one to jump to it on the Processes tab
-- **Mini view** (Ctrl+M): a small window with only CPU, memory, GPU, disk and network. Combine it with "always on top" to keep it next to a game or on another monitor
-- **Slower updates while gaming** (off by default): while a touch-free process runs, ProcSight updates less often to stay light
-- **Command palette** (Ctrl+K): find tabs, actions, processes and services by part of their name. **Keyboard shortcut list** with F1
-- **Startup**: enable or disable registry Run entries and startup folder items, recorded the same way Task Manager does, so both tools show the same state. Logon and boot tasks in Task Scheduler (enable or disable) and Store app startup tasks (view only) are listed too
-- **Services**: start, stop, restart and change the start type; running dependent services are listed before stopping
-- **Replace Task Manager** (off by default): open ProcSight with Ctrl+Shift+Esc and from the Ctrl+Alt+Del screen
-- Dark and light themes, six accent colors, font size, optional tray icon with CPU and/or memory usage, keyboard shortcuts (Delete, Ctrl+F, Ctrl+1 to Ctrl+4, Ctrl+C, Ctrl+K, Ctrl+M, F1)
-- **Settings** (all off or unchanged by default): tab to open at start (or the last one), start in the mini view or hidden in the tray, what the mini view shows, per-process CPU counted per core (100% = one logical processor), graph length, speeds in bits (Mbps), double-click action, start the tree collapsed, and where usage shading starts and peaks
+- **プロセス**: ツリーと一覧、並べ替え、名前・PID・パスでの絞り込み、列の表示・順序・幅の変更(次の起動にも残る)、新しく始まった行と終わった行の色分け
+  - CPU・メモリ・I/O・GPU のセルを使っている量で塗り、列の見出しに全体の値を出す(設定で切れる)
+  - 絞り込みの書き方: `cpu>5`、`mem>1gb`、`gpu>10`、`io>1mb`、`pid:1234`、`user:system`、`state:応答なし` などを空白で並べて重ねられる
+  - System Idle Process は、どの列で並べても一番下に置く
+  - 行の高さ(詰める・標準・ゆったり)
+  - 「CPU の推移」の列: プロセスごとの直近の小さなグラフ
+  - 一覧を CSV で保存(Excel で開ける形。式に見える値は無害にする)
+- **操作**: 終了、ツリーごとの終了、複数まとめての終了、優先度(低〜高)、CPU の割り当て、効率モード、一時停止と再開、前面に出す、ファイルの場所を開く、プロパティ
+- **詳細**: 全般(パス・コマンドライン・親・ユーザー・昇格・整合性レベル・アーキテクチャ)、スレッド、DLL、ハンドル、署名(ネットにつながずに確かめる)、CPU とメモリの小さなグラフ
+- **ファイルを掴んでいるプロセスを探す**: 「使用中で消せない」ファイルをドロップすると、使っているプロセスが分かる
+- **パフォーマンス**: CPU(全体と論理プロセッサごと)、メモリ、ディスク、ネットワーク、GPU のグラフ(直近 60・120・300 回分から選ぶ)
+  - CPU の構成(ソケット・コア・論理プロセッサ・L1〜L3 キャッシュ)、メモリの内訳(キャッシュ済み・ページ プール・非ページ プール)
+  - そのリソースを使っているプロセスの上位 5 個。押すとプロセスのタブのその行へ移る
+- **ミニ表示**(Ctrl+M): CPU・メモリ・GPU・ディスク・ネットだけの小さな窓。「常に手前に表示」と合わせると、ゲームの横や別の画面に置ける
+- **ゲーム中は更新を遅く**(設定でオン。既定はオフ): 触れないプロセスが動いている間、ProcSight 自身の更新を遅くして軽くする
+- **コマンド パレット**(Ctrl+K): タブ・操作・プロセス・サービスを名前の一部で探して移る。**キーボードのショートカットの一覧**は F1
+- **スタートアップ**: レジストリの Run とスタートアップ フォルダの項目を有効・無効にする(Windows のタスク マネージャーと同じ記録の仕方なので、どちらで切り替えても同じ状態が出る)。タスク スケジューラのログオン時・起動時のタスク(有効・無効)と、ストア アプリのスタートアップ(見るだけ)も並べる
+- **サービス**: 開始・停止・再起動・開始の種類の変更。止める前に、動いている依存のサービスを一覧で確かめる
+- **Ctrl+Shift+Esc の置き換え**(設定でオン。既定はオフ): Ctrl+Shift+Esc と Ctrl+Alt+Del の「タスク マネージャー」で ProcSight が開く
+- ダークとライトのテーマ、強調の色 6 つ、文字の大きさ、トレイのアイコン(設定でオン。CPU・メモリ・両方)、キーボードの操作(Delete・Ctrl+F・Ctrl+1〜4・Ctrl+C・Ctrl+K・Ctrl+M・F1)
+- **設定**(既定はどれも今までと同じ): 起動時に開くタブ(前回のタブも選べる)、ミニ表示やトレイにしまった状態で起動、ミニ表示に出す物、プロセスの CPU を 1 コア 100% で数える、グラフの長さ、速さをビット(Mbps)で出す、行のダブルクリックの動き、ツリーを畳んで始める、使用量の塗りを始める所と一番濃くする所
 
-![CPU graphs](docs/images/s2-cpu-cores-dark.png)
+![CPU のグラフ](docs/images/s2-cpu-cores-dark.png)
 
-![Memory and top processes](docs/images/s2-memory-dark.png)
+![メモリと使っているプロセス](docs/images/s2-memory-dark.png)
 
-![Command palette](docs/images/palette-note-dark.png)
+![コマンド パレット](docs/images/palette-note-dark.png)
 
-![Mini view](docs/images/mini-dark.png)
+![ミニ表示](docs/images/mini-dark.png)
 
-![Settings: table and graphs](docs/images/s5-settings-table-dark.png)
+![設定: 表とグラフ](docs/images/s5-settings-table-dark.png)
 
-## What ProcSight does not do
+![ハンドルの一覧](docs/images/s1-detail-handles-dark.png)
 
-- **No network access at all**: no update checks, telemetry, online lookups or certificate revocation checks.
-- **No history**: graphs and the per-process "CPU の推移" (CPU history) column keep only the last 60 samples (120 or 300 if chosen) in memory, and the history of an exited process is dropped at once.
-- **Critical processes cannot be ended or suspended**: Windows core processes (System, csrss.exe, lsass.exe and others), processes marked critical, and ProcSight itself.
-- No realtime priority, dumps, closing other processes' handles, or reading and writing other processes' memory.
+## ProcSight がしないこと
 
-## Resource usage compared with Task Manager
+- **ネットにつながりません。** 更新の確認・テレメトリ・オンラインの検索・署名の失効の確認を含め、通信は一切しません。
+- **履歴を保存しません。** グラフの値と、プロセスごとの「CPU の推移」は、メモリの直近 60 回分(設定で 120・300 回分)だけです(終わったプロセスの分はすぐ消します)。
+- **大事なプロセスは止めません。** System・csrss.exe・lsass.exe などの Windows の中核のプロセス、重要プロセスの印があるプロセス、ProcSight 自身は、終了も一時停止もできないようにしてあります。
+- 優先度「リアルタイム」、ダンプの作成、他のプロセスのハンドルを閉じる・メモリを読み書きする機能はありません。
 
-Measured on 2026-11-23 on one PC (Core i7-11700F, 16 logical processors, 32 GB RAM, Windows 11 build 26220). ProcSight v0.3.0 with the default settings and Windows Task Manager, both on the Processes tab and refreshing once per second. Each was sampled every 2 seconds for 45 seconds after warming up, twice; the table shows the range of the two runs.
+## タスク マネージャーとの軽さの比べ
 
-| | ProcSight v0.3.0 | Task Manager |
+2026-11-23 に 1 台の PC(Core i7-11700F、論理プロセッサ 16 個、メモリ 32 GB、Windows 11 ビルド 26220)で測りました。既定の設定の ProcSight v0.3.0 と Windows のタスク マネージャーを、どちらもプロセスのタブ・1 秒ごとの更新にして、なじませてから 2 秒ごとに 45 秒間を 2 回ずつ測りました。表は 2 回の幅です。
+
+| | ProcSight v0.3.0 | タスク マネージャー |
 |---|---|---|
-| CPU (share of the whole machine) | 0.13–0.18% | 1.1–1.6% |
-| CPU (100% = one logical processor) | 2.1–2.9% | 17.7–25.2% |
-| Working set | 186 MB | 222–225 MB |
-| Private bytes | 388 MB | 160–162 MB |
-| Threads / handles | 32 / 830 | 33–34 / 1,160 |
-| Time until the window appears | 43–136 ms | not measured |
+| CPU(PC 全体に対して) | 0.13〜0.18% | 1.1〜1.6% |
+| CPU(1 論理プロセッサを 100% として) | 2.1〜2.9% | 17.7〜25.2% |
+| 使っているメモリ(ワーキング セット) | 186 MB | 222〜225 MB |
+| 自分用に確保したメモリ(プライベート) | 388 MB | 160〜162 MB |
+| スレッド / ハンドル | 32 / 830 | 33〜34 / 1,160 |
+| 窓が出るまで | 43〜136 ミリ秒 | 測れず |
 
-- ProcSight used about 6 to 12 times less CPU and a somewhat smaller working set.
-- ProcSight committed more private memory (about 2.4 times), probably for GPU rendering and the Japanese font; this has not been investigated yet.
-- The conditions were not identical: Task Manager raised itself to administrator and stayed in the background, while ProcSight ran with standard rights in the foreground (always on top). Task Manager allows only one window, so its start time was not measured.
-- v0.4.0 only adds settings; with the default settings it does the same work as v0.3.0.
+- CPU は ProcSight が約 6〜12 分の 1、使っているメモリも少し少なめでした。
+- 自分用に確保したメモリは ProcSight の方が多く(約 2.4 倍)、GPU での描画と日本語のフォントの分と見ています(まだ調べていません)。
+- 条件はそろっていません。タスク マネージャーは自分で管理者に上がり、後ろの窓のまま。ProcSight は管理者でなく、手前の窓(常に手前)でした。タスク マネージャーは 1 つしか開けないので、窓が出るまでの時間は測れませんでした。
+- v0.4.0 は設定を足しただけで、既定の設定なら v0.3.0 と同じ仕事をします。
 
-## Touch-free processes (for gamers)
+## 触れないプロセス(ゲームを遊ぶ人へ)
 
-Register exe names (for example `game.exe`) under Settings → Touch-free processes. ProcSight never opens a handle to those processes or their descendants. They still appear in the list, but details and actions are not available. This is meant to avoid upsetting anti-cheat software.
+設定の「触れないプロセス」に exe 名(例: `game.exe`)を登録すると、そのプロセスと子孫には ProcSight からハンドルを開きません。一覧には出ますが、詳細の取得と操作は行いません。ゲームのアンチチートに怪しまれないようにするための設定です。
 
-- **Processes that are not registered are opened once when they are first seen** (with query-only rights, closed right away) to read their path and user. Register your games before starting ProcSight or before starting the game.
-- The process list is read only with `NtQuerySystemInformation`, which opens no process handles.
-- Every call that opens a process goes through a single gate that refuses touch-free processes. The number of opens per PID is shown under Settings → Diagnostics.
-- **This is not a guarantee of safety with any anti-cheat.** If in doubt, close ProcSight while playing.
+![触れないプロセスの設定](docs/images/s5-settings-touchfree-light.png)
 
-## Requirements
+- **登録していないプロセスは、パスやユーザーを読むために、見つけたときに 1 回ずつ開きます**(読むだけの権限で開いて、すぐ閉じます)。ゲームは、ProcSight を起動する前、またはゲームを起動する前に登録してください。
+- 一覧の取得は、どのプロセスのハンドルも開かない方法(`NtQuerySystemInformation`)だけで行います。
+- ハンドルを開く処理は 1 か所の関門を通り、触れないプロセスはそこで必ず断ります。開いた回数は設定の「診断」で見られます。
+- **これでアンチチートに対して安全だと保証するものではありません。** 心配なときは、ゲームの間は ProcSight を閉じてください。
 
-- Windows 11 (x64). Windows 10 is not supported.
-- Runs without administrator rights. To manage other users' processes, services or all-users startup items, use "Restart as administrator" at the top of the window.
+## 動作環境
 
-## Usage
+- Windows 11(x64)。Windows 10 は対象にしていません。
+- 管理者でなくても起動できます。他のユーザーのプロセス・サービス・全ユーザーのスタートアップを変えるときは、画面上部の「管理者で再起動」を使います。
 
-1. Download `procsight-v<version>-windows-x64.zip` from [Releases](https://github.com/takosasi-dev/procsight/releases) and extract it anywhere (current versions are pre-releases; see "Status" below).
-2. Run `ProcSight.exe`.
+## 使い方
 
-Settings are stored in `%APPDATA%\ProcSight\config.toml` and logs in `%LOCALAPPDATA%\ProcSight\logs\` (7 days). Logs never contain command lines, full paths or user names.
+1. [Releases](https://github.com/takosasi-dev/procsight/releases) から `procsight-v<版>-windows-x64.zip` を取り、好きなフォルダに展開します(今の版はプレリリースです。下の「開発の状況」を見てください)。
+2. `ProcSight.exe` を起動します。
 
-### Opening ProcSight with Ctrl+Shift+Esc
+設定は `%APPDATA%\ProcSight\config.toml`、ログは `%LOCALAPPDATA%\ProcSight\logs\`(7 日分)に置きます。ログにコマンドライン・フルパス・ユーザー名は書きません。
 
-This uses Image File Execution Options (the `Debugger` value of `taskmgr.exe`), the same mechanism as Process Explorer's "Replace Task Manager".
+### Ctrl+Shift+Esc で ProcSight を開く
 
-1. Put `ProcSight.exe` in `C:\Program Files\ProcSight\`. The option is only available from a location standard users cannot modify.
-2. Run ProcSight as administrator and turn on the option in Settings → General.
-3. The real Task Manager can still be opened from the context menu of a touch-free process ("Open Windows Task Manager").
+Windows の Image File Execution Options(`taskmgr.exe` の `Debugger` の値)を使います。Process Explorer の「Replace Task Manager」と同じ仕組みです。
 
-**To undo** (three ways, so you can recover even if ProcSight no longer starts):
+1. `ProcSight.exe` を `C:\Program Files\ProcSight\` に置きます(標準のユーザーが書き換えられない場所に置いたときだけオンにできます)。
+2. ProcSight を管理者で起動し、設定の「全般」で「Ctrl+Shift+Esc で ProcSight を開く」をオンにします。
+3. 本物のタスク マネージャーは、プロセスの右クリックの「Windows のタスク マネージャーを開く」(触れないプロセスの行)から開けます。
 
-- Turn the option off in Settings
-- Double-click `restore-taskmgr.reg` from the zip
-- Run this in an elevated command prompt:
+**元に戻す方法**(ProcSight が起動できなくなったときも戻せるように 3 つ用意しています):
+
+- 設定の画面でオフにする
+- 配布物の `restore-taskmgr.reg` をダブルクリックして取り込む
+- 管理者のコマンド プロンプトで次を打つ
 
 ```
 reg delete "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe" /v Debugger /f
 ```
 
-Because malware also uses this registry location, security software may remove the value. ProcSight tells you at startup when that happens.
+この場所はマルウェアにも使われるため、セキュリティ ソフトが値を消すことがあります。消されたときは、ProcSight が起動時に知らせます。
 
-## Building from source
+## ソースからビルドする
 
-Requires Rust 1.95 or later and Visual Studio's "Desktop development with C++" workload (MSVC and the Windows SDK).
+Rust 1.95 以上と、Visual Studio の「C++ によるデスクトップ開発」(MSVC と Windows SDK)が要ります。
 
 ```
 cargo build --release -p procsight-app
 ```
 
-This produces `target\release\ProcSight.exe`. `tools\publish.ps1` builds the distribution zip.
+`target\release\ProcSight.exe` ができます。配布用の zip は `tools\publish.ps1` で作ります。
 
-### Checks
+### 確かめ
 
 ```
 cargo test --workspace
@@ -124,21 +128,21 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check licenses bans
 ```
 
-UI tests render without creating a window (egui_kittest). `procsight-testee` is a test process and is not distributed. `procsight-probe` cross-checks undocumented NT structures against public APIs.
+画面のテストは窓を作らずに描きます(egui_kittest)。`procsight-testee` はテスト用のプロセスで、配布物には入れません。`procsight-probe` は、公開されていない API の値を公開 API と突き合わせる確かめ用の道具です。
 
-## Layout
+## 構成
 
-| crate | Role |
+| crate | 役割 |
 |---|---|
-| `procsight-core` | Platform-independent logic (diffs, tree, filters, safety rules, config). Uses no Windows crates |
-| `procsight-win` | Win32 and NT API calls. The only crate with `unsafe` |
-| `procsight-app` | User interface (eframe / egui) |
-| `procsight-probe` / `procsight-uiprobe` / `procsight-testee` | Verification tools |
+| `procsight-core` | Windows に依存しない判定(差分・ツリー・絞り込み・止めてよいかの判定・設定)。Windows の crate を使わない |
+| `procsight-win` | Win32 と NT の API の呼び出し。`unsafe` はこの crate だけ |
+| `procsight-app` | 画面(eframe / egui) |
+| `procsight-probe` / `procsight-uiprobe` / `procsight-testee` | 確かめ用の道具 |
 
-## Status
+## 開発の状況
 
-v0.4.0 is a pre-release. The UI is verified with windowless rendering tests, but the new settings are not yet verified by hands-on use. The automated tests (about 245) and checks with standard user rights pass. Administrator operations (services, all-users startup items, replacing Task Manager) and comparisons with Task Manager's numbers are still waiting for hands-on verification. Resource usage compared with Task Manager is shown above.
+v0.4.0 はプレリリースです。自動のテスト(245 件ほど)と、標準の権限での確かめは済んでいます。画面の動きは窓を作らないテストで確かめていて、新しい設定の実際の窓での手触りはまだ確かめていません。タスク マネージャーとの軽さの比べは上に載せています。管理者での操作(サービス・全ユーザーのスタートアップ・Ctrl+Shift+Esc の置き換え)と、タスク マネージャーとの値の比べは、作者の PC での確かめを待っています。
 
-## License
+## ライセンス
 
-MIT License ([LICENSE](LICENSE)). Licenses of the bundled crates are listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Japanese text is drawn with fonts that ship with Windows (such as Yu Gothic UI); no fonts are bundled.
+MIT License([LICENSE](LICENSE))。依存する crate のライセンスは [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) にあります。日本語の文字は Windows に入っているフォント(Yu Gothic UI など)を使い、フォントは同梱していません。

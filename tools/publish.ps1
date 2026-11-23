@@ -29,7 +29,7 @@ $files = @(
     @{ Src = 'target\release\ProcSight.exe'; Name = 'ProcSight.exe' },
     @{ Src = 'dist\restore-taskmgr.reg'; Name = 'restore-taskmgr.reg' },
     @{ Src = 'README.md'; Name = 'README.md' },
-    @{ Src = 'README_ja.md'; Name = 'README_ja.md' },
+    @{ Src = 'README.en.md'; Name = 'README.en.md' },
     @{ Src = 'LICENSE'; Name = 'LICENSE' },
     @{ Src = 'THIRD-PARTY-NOTICES.md'; Name = 'THIRD-PARTY-NOTICES.md' },
     @{ Src = 'CHANGELOG.md'; Name = 'CHANGELOG.md' }

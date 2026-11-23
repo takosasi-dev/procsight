@@ -1,0 +1,144 @@
+# ProcSight
+
+[日本語](README.md) | English
+
+A process manager for Windows 11 that replaces the built-in Task Manager. It is a single exe written in Rust and egui, needs no installer, and has a Japanese user interface.
+
+![Processes tab](docs/images/s1-processes-dark.png)
+
+## Features
+
+- **Processes**: tree and flat views, sorting, filtering by name, PID or path, configurable columns (shown, order, width; remembered), highlighting of started and exited rows
+  - CPU, memory, I/O and GPU cells shaded by usage, with machine totals in the column headers (can be turned off)
+  - Filter syntax: combine `cpu>5`, `mem>1gb`, `gpu>10`, `io>1mb`, `pid:1234`, `user:system`, `state:hung` and plain words
+  - System Idle Process always sorts to the bottom
+  - Row height (compact, normal, comfortable)
+  - "CPU の推移" (CPU history) column: a small graph of the recent samples per process
+  - Save the list as CSV (opens in Excel; values that look like formulas are neutralised)
+- **Actions**: end process, end process tree, end several at once, priority (Idle to High), CPU affinity, efficiency mode, suspend and resume, bring to front, open file location, properties
+- **Details**: general (path, command line, parent, user, elevation, integrity level, architecture), threads, DLLs, handles, signature (verified without network access), small CPU and memory graphs
+- **Find what locks a file**: drop a file that "is in use" to see which processes hold it
+- **Performance**: CPU (total and per logical processor), memory, disks, network adapters and GPUs (last 60, 120 or 300 samples)
+  - CPU topology (sockets, cores, logical processors, L1 to L3 cache) and memory breakdown (cached, paged pool, non-paged pool)
+  - Top 5 processes using the selected resource; click one to jump to it on the Processes tab
+- **Mini view** (Ctrl+M): a small window with only CPU, memory, GPU, disk and network. Combine it with "always on top" to keep it next to a game or on another monitor
+- **Slower updates while gaming** (off by default): while a touch-free process runs, ProcSight updates less often to stay light
+- **Command palette** (Ctrl+K): find tabs, actions, processes and services by part of their name. **Keyboard shortcut list** with F1
+- **Startup**: enable or disable registry Run entries and startup folder items, recorded the same way Task Manager does, so both tools show the same state. Logon and boot tasks in Task Scheduler (enable or disable) and Store app startup tasks (view only) are listed too
+- **Services**: start, stop, restart and change the start type; running dependent services are listed before stopping
+- **Replace Task Manager** (off by default): open ProcSight with Ctrl+Shift+Esc and from the Ctrl+Alt+Del screen
+- Dark and light themes, six accent colors, font size, optional tray icon with CPU and/or memory usage, keyboard shortcuts (Delete, Ctrl+F, Ctrl+1 to Ctrl+4, Ctrl+C, Ctrl+K, Ctrl+M, F1)
+- **Settings** (all off or unchanged by default): tab to open at start (or the last one), start in the mini view or hidden in the tray, what the mini view shows, per-process CPU counted per core (100% = one logical processor), graph length, speeds in bits (Mbps), double-click action, start the tree collapsed, and where usage shading starts and peaks
+
+![CPU graphs](docs/images/s2-cpu-cores-dark.png)
+
+![Memory and top processes](docs/images/s2-memory-dark.png)
+
+![Command palette](docs/images/palette-note-dark.png)
+
+![Mini view](docs/images/mini-dark.png)
+
+![Settings: table and graphs](docs/images/s5-settings-table-dark.png)
+
+## What ProcSight does not do
+
+- **No network access at all**: no update checks, telemetry, online lookups or certificate revocation checks.
+- **No history**: graphs and the per-process "CPU の推移" (CPU history) column keep only the last 60 samples (120 or 300 if chosen) in memory, and the history of an exited process is dropped at once.
+- **Critical processes cannot be ended or suspended**: Windows core processes (System, csrss.exe, lsass.exe and others), processes marked critical, and ProcSight itself.
+- No realtime priority, dumps, closing other processes' handles, or reading and writing other processes' memory.
+
+## Resource usage compared with Task Manager
+
+Measured on 2026-11-23 on one PC (Core i7-11700F, 16 logical processors, 32 GB RAM, Windows 11 build 26220). ProcSight v0.3.0 with the default settings and Windows Task Manager, both on the Processes tab and refreshing once per second. Each was sampled every 2 seconds for 45 seconds after warming up, twice; the table shows the range of the two runs.
+
+| | ProcSight v0.3.0 | Task Manager |
+|---|---|---|
+| CPU (share of the whole machine) | 0.13–0.18% | 1.1–1.6% |
+| CPU (100% = one logical processor) | 2.1–2.9% | 17.7–25.2% |
+| Working set | 186 MB | 222–225 MB |
+| Private bytes | 388 MB | 160–162 MB |
+| Threads / handles | 32 / 830 | 33–34 / 1,160 |
+| Time until the window appears | 43–136 ms | not measured |
+
+- ProcSight used about 6 to 12 times less CPU and a somewhat smaller working set.
+- ProcSight committed more private memory (about 2.4 times), probably for GPU rendering and the Japanese font; this has not been investigated yet.
+- The conditions were not identical: Task Manager raised itself to administrator and stayed in the background, while ProcSight ran with standard rights in the foreground (always on top). Task Manager allows only one window, so its start time was not measured.
+- v0.4.0 only adds settings; with the default settings it does the same work as v0.3.0.
+
+## Touch-free processes (for gamers)
+
+Register exe names (for example `game.exe`) under Settings → Touch-free processes. ProcSight never opens a handle to those processes or their descendants. They still appear in the list, but details and actions are not available. This is meant to avoid upsetting anti-cheat software.
+
+- **Processes that are not registered are opened once when they are first seen** (with query-only rights, closed right away) to read their path and user. Register your games before starting ProcSight or before starting the game.
+- The process list is read only with `NtQuerySystemInformation`, which opens no process handles.
+- Every call that opens a process goes through a single gate that refuses touch-free processes. The number of opens per PID is shown under Settings → Diagnostics.
+- **This is not a guarantee of safety with any anti-cheat.** If in doubt, close ProcSight while playing.
+
+## Requirements
+
+- Windows 11 (x64). Windows 10 is not supported.
+- Runs without administrator rights. To manage other users' processes, services or all-users startup items, use "Restart as administrator" at the top of the window.
+
+## Usage
+
+1. Download `procsight-v<version>-windows-x64.zip` from [Releases](https://github.com/takosasi-dev/procsight/releases) and extract it anywhere (current versions are pre-releases; see "Status" below).
+2. Run `ProcSight.exe`.
+
+Settings are stored in `%APPDATA%\ProcSight\config.toml` and logs in `%LOCALAPPDATA%\ProcSight\logs\` (7 days). Logs never contain command lines, full paths or user names.
+
+### Opening ProcSight with Ctrl+Shift+Esc
+
+This uses Image File Execution Options (the `Debugger` value of `taskmgr.exe`), the same mechanism as Process Explorer's "Replace Task Manager".
+
+1. Put `ProcSight.exe` in `C:\Program Files\ProcSight\`. The option is only available from a location standard users cannot modify.
+2. Run ProcSight as administrator and turn on the option in Settings → General.
+3. The real Task Manager can still be opened from the context menu of a touch-free process ("Open Windows Task Manager").
+
+**To undo** (three ways, so you can recover even if ProcSight no longer starts):
+
+- Turn the option off in Settings
+- Double-click `restore-taskmgr.reg` from the zip
+- Run this in an elevated command prompt:
+
+```
+reg delete "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe" /v Debugger /f
+```
+
+Because malware also uses this registry location, security software may remove the value. ProcSight tells you at startup when that happens.
+
+## Building from source
+
+Requires Rust 1.95 or later and Visual Studio's "Desktop development with C++" workload (MSVC and the Windows SDK).
+
+```
+cargo build --release -p procsight-app
+```
+
+This produces `target\release\ProcSight.exe`. `tools\publish.ps1` builds the distribution zip.
+
+### Checks
+
+```
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo deny check licenses bans
+```
+
+UI tests render without creating a window (egui_kittest). `procsight-testee` is a test process and is not distributed. `procsight-probe` cross-checks undocumented NT structures against public APIs.
+
+## Layout
+
+| crate | Role |
+|---|---|
+| `procsight-core` | Platform-independent logic (diffs, tree, filters, safety rules, config). Uses no Windows crates |
+| `procsight-win` | Win32 and NT API calls. The only crate with `unsafe` |
+| `procsight-app` | User interface (eframe / egui) |
+| `procsight-probe` / `procsight-uiprobe` / `procsight-testee` | Verification tools |
+
+## Status
+
+v0.4.0 is a pre-release. The UI is verified with windowless rendering tests, but the new settings are not yet verified by hands-on use. The automated tests (about 245) and checks with standard user rights pass. Administrator operations (services, all-users startup items, replacing Task Manager) and comparisons with Task Manager's numbers are still waiting for hands-on verification. Resource usage compared with Task Manager is shown above.
+
+## License
+
+MIT License ([LICENSE](LICENSE)). Licenses of the bundled crates are listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Japanese text is drawn with fonts that ship with Windows (such as Yu Gothic UI); no fonts are bundled.
