@@ -3,6 +3,23 @@
 All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-23
+
+Pre-release. Eleven new settings; with the default settings ProcSight behaves as v0.3.0. The new behaviour is verified with windowless rendering tests only.
+
+### Added
+
+- Settings → 全般: tab to open at start (or the last tab), start in the normal view, the mini view, or hidden in the tray (only for a normal start; Ctrl+Shift+Esc and restarts as administrator always show the window)
+- Settings → 見た目: six accent colors; where usage shading starts and where it is darkest
+- Settings → 表とグラフ (new page): per-process CPU counted per core (100% = one logical processor; machine totals stay 0–100%, the `cpu>` filter uses the shown numbers), graph length 60, 120 or 300 samples (memory only), disk and network speeds in bits (bps, Kbps, Mbps, Gbps), double-click on a process row (details, open file location, or nothing), start the tree collapsed
+- Settings → ミニ表示とトレイ (new page): which graphs and whether the top process appear in the mini view; tray icon meter for CPU, memory, or both
+- README: resource usage compared with Task Manager
+
+### Changed
+
+- With the orange accent, the second graph line is blue so that the two lines stay distinguishable
+- The tray tooltip is updated whenever its number changes, not only when the icon changes
+
 ## [0.3.0] - 2026-11-22
 
 Pre-release. The new screens are verified with windowless rendering tests only; the mini view, always on top, the save dialog and toggling scheduled tasks need hands-on checks.

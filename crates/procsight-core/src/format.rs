@@ -1,5 +1,7 @@
 //! 画面に出す数字の形(画面設計書 §4.2)。メモリは 1024 進で小数 1 桁、速さは B/s・KB/s・MB/s、値が無ければ「—」。
 
+use crate::config::SpeedUnit;
+
 pub const DASH: &str = "—";
 
 pub fn bytes(v: u64) -> String {
@@ -20,9 +22,41 @@ pub fn opt_bytes(v: Option<u64>) -> String {
     v.map_or_else(|| DASH.into(), bytes)
 }
 
+thread_local! {
+    // ponytail: 速さの単位は画面のスレッドに 1 つ(app が毎フレーム cfg から入れる)。全部の呼び元に単位を渡す形は、呼び元が 20 近くあるので見送り
+    static SPEED_UNIT: std::cell::Cell<SpeedUnit> = const { std::cell::Cell::new(SpeedUnit::Bytes) };
+}
+
+/// このスレッドの速さの単位を決める(app は毎フレーム `cfg.speed_unit` を入れる)
+pub fn set_speed_unit(u: SpeedUnit) {
+    SPEED_UNIT.with(|c| c.set(u));
+}
+
+pub fn speed_unit() -> SpeedUnit {
+    SPEED_UNIT.with(|c| c.get())
+}
+
+/// 速さ(B/s)を、このスレッドの単位(`set_speed_unit`)で
 pub fn speed(v: Option<f64>) -> String {
+    speed_in(v, speed_unit())
+}
+
+/// 速さ(B/s)を決めた単位で。Bits は 8 を掛けて 1000 進(bps・Kbps・Mbps・Gbps)
+pub fn speed_in(v: Option<f64>, unit: SpeedUnit) -> String {
     let Some(v) = v else { return DASH.into() };
     let v = v.max(0.0);
+    if unit == SpeedUnit::Bits {
+        let b = v * 8.0;
+        return if b < 1000.0 {
+            format!("{b:.0} bps")
+        } else if b < 1e6 {
+            format!("{:.1} Kbps", b / 1e3)
+        } else if b < 1e9 {
+            format!("{:.1} Mbps", b / 1e6)
+        } else {
+            format!("{:.1} Gbps", b / 1e9)
+        };
+    }
     if v < 1024.0 {
         format!("{v:.0} B/s")
     } else if v < 1024.0 * 1024.0 {
@@ -105,6 +139,16 @@ mod tests {
         assert_eq!(speed(Some(0.0)), "0 B/s");
         assert_eq!(speed(Some(12.0 * 1024.0)), "12.0 KB/s");
         assert_eq!(speed(Some(20.0 * 1024.0 * 1024.0)), "20.0 MB/s");
+        assert_eq!(speed_in(Some(0.0), SpeedUnit::Bits), "0 bps");
+        assert_eq!(speed_in(Some(100.0), SpeedUnit::Bits), "800 bps");
+        assert_eq!(speed_in(Some(125_000.0), SpeedUnit::Bits), "1.0 Mbps");
+        assert_eq!(speed_in(Some(12_500.0), SpeedUnit::Bits), "100.0 Kbps");
+        assert_eq!(speed_in(Some(250_000_000.0), SpeedUnit::Bits), "2.0 Gbps");
+        assert_eq!(speed_in(None, SpeedUnit::Bits), "—");
+        // スレッドの単位は既定でバイト、入れたら変わる(テストのスレッドだけ)
+        set_speed_unit(SpeedUnit::Bits);
+        assert_eq!(speed(Some(125_000.0)), "1.0 Mbps");
+        set_speed_unit(SpeedUnit::Bytes);
         assert_eq!(pct(Some(18.44)), "18.4%");
         assert_eq!(thousands(151203), "151,203");
         assert_eq!(thousands(12), "12");

@@ -11,6 +11,7 @@ use procsight_app::demo;
 use procsight_app::dialogs::Dialog;
 use procsight_app::mini::{self, MINI_MIN, MINI_SIZE, NORMAL_MIN, WindowChange, WindowFacts, window_commands};
 use procsight_app::settings::SPage;
+use procsight_core::config::{CpuScale, MiniItems, SpeedUnit};
 use procsight_core::{PerfSample, ProcState};
 use std::sync::Arc;
 
@@ -19,6 +20,13 @@ fn mini_state() -> State {
     st.set_mini(true);
     st.actions.clear();
     st
+}
+
+/// 描き手(wgpu)を作るテストは 1 つずつ走らせる。
+/// ponytail: 並行で描き手を多く作ると、まれにプロセスごと 0xc0000005 で落ちた(並行 10 回に 1 回ほど・1 本のスレッドでは 10 回とも通過)。原因が wgpu か描き手の側で分かれば外す
+fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    L.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn facts() -> WindowFacts {
@@ -89,6 +97,7 @@ fn geometry_is_written_again_only_after_the_window_came_back() {
 
 #[test]
 fn ctrl_m_toggles_mini_and_queues_set_mini() {
+    let _gpu = gpu_lock();
     let mut h = harness(demo::state(), true, BIG);
     h.run_steps(2);
     h.state_mut().actions.clear();
@@ -105,6 +114,7 @@ fn ctrl_m_toggles_mini_and_queues_set_mini() {
 
 #[test]
 fn dialog_or_button_band_or_palette_returns_to_normal_view() {
+    let _gpu = gpu_lock();
     // D7 などの確認の窓
     let mut h = harness(mini_state(), true, [300.0, 230.0]);
     h.run_steps(2);
@@ -139,6 +149,7 @@ fn dialog_or_button_band_or_palette_returns_to_normal_view() {
 
 #[test]
 fn restore_button_and_top_process_return_to_normal() {
+    let _gpu = gpu_lock();
     use egui_kittest::kittest::Queryable;
     let mut h = harness(mini_state(), true, [300.0, 230.0]);
     h.run_steps(2);
@@ -165,6 +176,7 @@ fn restore_button_and_top_process_return_to_normal() {
 
 #[test]
 fn double_click_on_a_metric_row_returns_to_normal() {
+    let _gpu = gpu_lock();
     let mut h = harness(mini_state(), true, [300.0, 230.0]);
     // kittest は押す・離すを 1 フレーム(0.25 秒)ずつ進めるので、ダブルクリックの間を広げる
     h.ctx.options_mut(|o| o.input_options.max_double_click_delay = 1.0);
@@ -181,6 +193,108 @@ fn double_click_on_a_metric_row_returns_to_normal() {
     assert!(!h.state().mini);
 }
 
+// ---------------------------------------------------------------- v0.4.0 の設定(担当 I)
+
+/// 出す物を絞った形(行の名前は widget_info の「名前 値」で見る)
+fn mini_with(items: MiniItems) -> State {
+    let mut st = mini_state();
+    st.cfg.mini_items = items;
+    st
+}
+
+const NONE: MiniItems = MiniItems { cpu: false, mem: false, gpu: false, disk: false, net_recv: false, net_send: false, top_process: false };
+
+#[test]
+fn mini_items_choose_the_rows() {
+    let _gpu = gpu_lock();
+    use egui_kittest::kittest::Queryable;
+    let top = mini_state().perf.tops.cpu[0].name.clone();
+    for (items, want, not) in [
+        (MiniItems { top_process: true, ..NONE }, vec![format!("上位 {top}")], vec!["CPU ", "メモリ ", "受信 "]),
+        (MiniItems { cpu: true, ..NONE }, vec!["CPU ".to_string()], vec!["上位 ", "メモリ ", "送信 "]),
+        (MiniItems { net_recv: true, net_send: true, ..NONE }, vec!["受信 ".into(), "送信 ".into()], vec!["上位 ", "CPU ", "GPU "]),
+    ] {
+        let mut h = harness(mini_with(items.clone()), true, [MINI_SIZE.x, MINI_SIZE.y]);
+        h.run_steps(2);
+        for w in &want {
+            assert!(h.query_by_label_contains(w).is_some(), "{items:?} で {w} が無い");
+        }
+        for n in not {
+            assert!(h.query_by_label_contains(n).is_none(), "{items:?} で {n} が出た");
+        }
+    }
+}
+
+/// グラフの長さ 300: ミニを描くだけで輪の長さが合う(普通の表示の perf を通らなくても)
+#[test]
+fn mini_follows_graph_points() {
+    let _gpu = gpu_lock();
+    let mut st = mini_state();
+    st.cfg.graph_points = 300;
+    let mut h = harness(st, true, [MINI_SIZE.x, MINI_SIZE.y]);
+    h.run_steps(2);
+    assert_eq!(h.state().perf.points(), 300);
+    assert_eq!(h.state().perf.cpu.len(), 60, "伸ばしても今までの 60 回分は残る");
+}
+
+/// グラフの長さ 300。full なら 300 回分まで溜めた形(set_points の後に積む)、そうでなければ 60 回分だけ(右に寄る)
+fn mini_300(full: bool) -> State {
+    let mut st = mini_state();
+    st.cfg.graph_points = 300;
+    st.perf.set_points(300);
+    if full {
+        for seq in 61..=360 {
+            st.set_snapshot(Arc::new(demo::snapshot(seq)));
+        }
+    }
+    st
+}
+
+fn mini_bits() -> State {
+    let mut st = mini_state();
+    st.cfg.speed_unit = SpeedUnit::Bits;
+    st
+}
+
+fn net_only() -> State {
+    mini_with(MiniItems { net_recv: true, net_send: true, ..NONE })
+}
+
+fn cpu_mem_top() -> State {
+    mini_with(MiniItems { cpu: true, mem: true, top_process: true, ..NONE })
+}
+
+#[test]
+fn mini_view_v040_settings() {
+    let _gpu = gpu_lock();
+    shoot("mini-300", [MINI_SIZE.x, MINI_SIZE.y], || mini_300(true));
+    shoot("mini-300-partial", [MINI_SIZE.x, MINI_SIZE.y], || mini_300(false));
+    shoot("mini-bits", [MINI_SIZE.x, MINI_SIZE.y], mini_bits);
+    shoot("mini-percore", [MINI_SIZE.x, MINI_SIZE.y], || {
+        let mut st = mini_state();
+        st.cfg.cpu_scale = CpuScale::PerCore;
+        st
+    });
+    shoot("mini-top-only", [MINI_SIZE.x, MINI_SIZE.y], || mini_with(MiniItems { top_process: true, ..NONE }));
+    shoot("mini-cpu-only", [MINI_SIZE.x, MINI_SIZE.y], || mini_with(MiniItems { cpu: true, ..NONE }));
+    shoot("mini-net-only", [MINI_SIZE.x, MINI_SIZE.y], net_only);
+    shoot("mini-cpu-mem-top", [MINI_SIZE.x, MINI_SIZE.y], cpu_mem_top);
+    // 崩れやすい条件(ダーク): ビットで最小の大きさ・文字 160%、行を減らして最小の大きさで 160%・入る大きさで 160%
+    type Make = fn() -> State;
+    let cases: [(&str, Vec2, f32, Make); 4] = [
+        ("bits-min", MINI_MIN, 1.0, mini_bits),
+        ("bits-scale160", MINI_SIZE, 1.6, mini_bits),
+        ("net-only-min160", MINI_MIN, 1.6, net_only),
+        ("cpu-mem-top-scale160", MINI_SIZE, 1.6, cpu_mem_top),
+    ];
+    for (suffix, pts, scale, make) in cases {
+        let mut st = make();
+        st.cfg.font_scale = scale;
+        let mut h = harness(st, true, [pts.x * scale, pts.y * scale]);
+        save(&mut h, &format!("mini-{suffix}"));
+    }
+}
+
 #[test]
 fn top_process_skips_idle_and_gone_rows() {
     let st = demo::state();
@@ -194,6 +308,7 @@ fn top_process_skips_idle_and_gone_rows() {
 /// ミニの大きさで、ダーク・ライト。300×230(入ったときの大きさ)と 360×300(少し広げた形)
 #[test]
 fn mini_view() {
+    let _gpu = gpu_lock();
     shoot("mini", [MINI_SIZE.x, MINI_SIZE.y], mini_state);
     shoot("mini-360x300", [360.0, 300.0], mini_state);
 }
@@ -202,6 +317,7 @@ fn mini_view() {
 /// 最小の大きさで 160%、さらに本物より厳しい「実寸 300×230 のまま 160%」
 #[test]
 fn mini_view_stress() {
+    let _gpu = gpu_lock();
     for (suffix, pts, scale) in [
         ("min", MINI_MIN, 1.0),
         ("scale80", MINI_SIZE, 0.8),
@@ -219,6 +335,7 @@ fn mini_view_stress() {
 /// 触れないプロセスが動いていて、ゲーム中の遅い更新が効いている・更新を止めている
 #[test]
 fn mini_view_touch_free_slow_and_paused() {
+    let _gpu = gpu_lock();
     shoot("mini-slow", [MINI_SIZE.x, MINI_SIZE.y], || {
         let mut st = mini_state();
         assert!(st.snap.rows.iter().any(|r| r.state == ProcState::TouchFree && r.is_gone == 0));
@@ -242,6 +359,7 @@ fn mini_view_touch_free_slow_and_paused() {
 /// 値が取れない(PDH・GPU・メモリが無い)。履歴も無い起動の直後
 #[test]
 fn mini_view_unavailable() {
+    let _gpu = gpu_lock();
     shoot("mini-unavailable", [MINI_SIZE.x, MINI_SIZE.y], || {
         let mut st = State::new(demo::env(), Default::default());
         let mut s = demo::snapshot(1);
@@ -257,6 +375,7 @@ fn mini_view_unavailable() {
 /// パレットの新しい項目(常に手前は今の値に「使用中」)と、ショートカットの一覧の Ctrl+M
 #[test]
 fn palette_items_and_shortcut_list() {
+    let _gpu = gpu_lock();
     shoot("palette-mini-items", BIG, || {
         let mut st = demo::state();
         st.cfg.always_on_top = true;
@@ -291,6 +410,7 @@ fn settings_general() -> State {
 /// 設定の「全般」: 既定(オフ)と、遅い更新をオンにして今の間隔のほうが長いときの説明
 #[test]
 fn settings_general_page() {
+    let _gpu = gpu_lock();
     shoot("s5-general-v3", BIG, settings_general);
     shoot("s5-general-slow", BIG, || {
         let mut st = settings_general();
@@ -304,6 +424,7 @@ fn settings_general_page() {
 
 #[test]
 fn settings_toggle_slow_takes_effect_at_once() {
+    let _gpu = gpu_lock();
     use egui_kittest::kittest::Queryable;
     let mut h = harness(settings_general(), true, BIG);
     h.run_steps(2);

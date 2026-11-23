@@ -174,6 +174,70 @@ fn s2_after_interval_change() {
     save(&mut h, "s2-after-clear-dark");
 }
 
+// ---------------------------------------------------------------- v0.4.0 の設定(担当 I)
+
+/// グラフの長さ 300。full なら 300 回分まで溜めた形(set_points の後に積む)
+fn points_300(page: Page, per_core: bool, full: bool) -> State {
+    let mut st = on_page(page, per_core);
+    st.cfg.graph_points = 300;
+    st.perf.set_points(300);
+    if full {
+        for seq in 61..=360 {
+            st.set_snapshot(Arc::new(demo::snapshot(seq)));
+        }
+    }
+    st
+}
+
+/// 描くだけで輪の長さが設定に合い、下の行の「N 回分(直近 …)」も変わる
+#[test]
+fn s2_graph_points_follow_the_setting() {
+    let mut st = on_page(Page::Cpu, false);
+    st.cfg.graph_points = 120;
+    let mut h = harness(st, true, BIG);
+    h.run_steps(2);
+    assert_eq!(h.state().perf.points(), 120);
+    assert!(h.query_by_label("120 回分(直近 2 分)").is_some());
+    let mut h = harness(on_page(Page::Cpu, false), true, BIG);
+    h.run_steps(2);
+    assert!(h.query_by_label("60 回分(直近 1 分)").is_some(), "既定は v0.3.0 と同じ");
+}
+
+fn with_bits(page: Page) -> State {
+    let mut st = on_page(page, false);
+    st.cfg.speed_unit = procsight_core::config::SpeedUnit::Bits;
+    st
+}
+
+#[test]
+fn s2_v040_settings() {
+    shoot("s2-300-cpu", BIG, || points_300(Page::Cpu, false, true));
+    shoot("s2-300-cores", BIG, || points_300(Page::Cpu, true, true));
+    shoot("s2-300-net", BIG, || points_300(Page::Net("Wi-Fi".into()), false, true));
+    shoot("s2-300-partial", BIG, || points_300(Page::Disk("0 C:".into()), false, false));
+    shoot("s2-bits-net", BIG, || with_bits(Page::Net("Wi-Fi".into())));
+    shoot("s2-bits-disk", BIG, || with_bits(Page::Disk("0 C:".into())));
+    shoot_stress("s2-bits-net", || with_bits(Page::Net("Wi-Fi".into())));
+    shoot_stress("s2-bits-disk", || with_bits(Page::Disk("0 C:".into())));
+    shoot("s2-percore", BIG, || {
+        let mut st = on_page(Page::Cpu, false);
+        st.cfg.cpu_scale = procsight_core::config::CpuScale::PerCore;
+        st
+    });
+    // ビットの下の段(ディスクの速さのグラフ・ネットの送信だけの目盛り)まで見えるよう、縦に長い窓で狭い幅・文字 160%
+    for (name, page) in [("disk", Page::Disk("0 C:".into())), ("net", Page::Net("Wi-Fi".into()))] {
+        let mut h = harness(with_bits(page.clone()), true, [760.0, 1300.0]);
+        save(&mut h, &format!("s2-bits-tall-{name}-narrow"));
+        let mut st = with_bits(page);
+        st.cfg.font_scale = 1.6;
+        let mut h = harness(st, true, [1280.0, 1600.0]);
+        save(&mut h, &format!("s2-bits-tall-{name}-scale160"));
+    }
+    // 300 回分で左の並びの小さなグラフも詰まりすぎないか、狭い幅で
+    let mut h = harness(points_300(Page::Memory, false, true), true, [760.0, 520.0]);
+    save(&mut h, "s2-300-memory-narrow");
+}
+
 /// ネットワークのページには上位のプロセスを出さない(プロセスごとの通信量は非スコープ)
 #[test]
 fn s2_net_page_has_no_process_table() {

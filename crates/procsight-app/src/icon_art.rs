@@ -1,5 +1,5 @@
 //! 窓・exe・トレイのアイコンの絵(RGBA)を std だけで描く。build.rs からも include! で使う。
-//! exe のアイコンは棒のグラフの印、トレイは CPU 使用率の棒(FR-47)。
+//! exe のアイコンは棒のグラフの印、トレイは CPU・メモリの使用率の棒(FR-47、v0.4.0 の tray_value)。
 
 /// 角を丸めた四角の中にあるか(半径 r)
 fn inside_rounded(x: f32, y: f32, size: f32, r: f32) -> bool {
@@ -43,28 +43,47 @@ pub fn app_icon_rgba(size: u32) -> Vec<u8> {
     out
 }
 
-/// トレイのアイコン(16×16)。CPU 使用率 `pct`(0〜100)を下から伸びる棒で描く
-pub fn tray_cpu_rgba(pct: f32) -> Vec<u8> {
-    const N: usize = 16;
+/// 0〜100 に丸めた値と、中の高さ 14 画素のうち塗る画素の数(0% でも 1 画素は出す)
+fn tray_level(pct: f32) -> (f32, usize) {
     let pct = if pct.is_finite() { pct.clamp(0.0, 100.0) } else { 0.0 };
-    let mut out = vec![0u8; N * N * 4];
-    // 中の高さ 14 画素のうち、何画素を塗るか(0% でも 1 画素は出す)
-    let filled = ((pct / 100.0 * 14.0).round() as usize).max(1);
-    let bar = if pct >= 80.0 {
+    (pct, ((pct / 100.0 * 14.0).round() as usize).max(1))
+}
+
+/// CPU の棒の色(緑・橙・赤)
+fn cpu_color(pct: f32) -> [u8; 4] {
+    if pct >= 80.0 {
         [0xE5, 0x48, 0x4D, 0xFF]
     } else if pct >= 50.0 {
         [0xF0, 0xA0, 0x30, 0xFF]
     } else {
         [0x3C, 0xC8, 0xA0, 0xFF]
-    };
+    }
+}
+
+/// メモリの棒の色(紫・橙・赤。CPU と見分けられるように)
+fn mem_color(pct: f32) -> [u8; 4] {
+    if pct >= 90.0 {
+        [0xE5, 0x48, 0x4D, 0xFF]
+    } else if pct >= 80.0 {
+        [0xF0, 0xA0, 0x30, 0xFF]
+    } else {
+        [0xA0, 0x7C, 0xF0, 0xFF]
+    }
+}
+
+/// 16×16 の枠の中に、下から伸びる棒を描く。棒は (左の x, 右の x(含まない), 塗る画素, 色)
+fn tray_bars(bars: &[(usize, usize, usize, [u8; 4])]) -> Vec<u8> {
+    const N: usize = 16;
+    let mut out = vec![0u8; N * N * 4];
     for y in 0..N {
         for x in 0..N {
             let i = (y * N + x) * 4;
             let edge = x == 0 || y == 0 || x == N - 1 || y == N - 1;
+            let bar = bars.iter().find(|b| (b.0..b.1).contains(&x) && N - 1 - y <= b.2);
             let px = if edge {
                 [0x9A, 0xA6, 0xB2, 0xFF]
-            } else if (3..13).contains(&x) && N - 1 - y <= filled {
-                bar
+            } else if let Some(b) = bar {
+                b.3
             } else {
                 [0x1E, 0x2A, 0x38, 0xFF]
             };
@@ -72,4 +91,22 @@ pub fn tray_cpu_rgba(pct: f32) -> Vec<u8> {
         }
     }
     out
+}
+
+/// トレイのアイコン(16×16)。CPU 使用率 `pct`(0〜100)を下から伸びる棒で描く
+pub fn tray_cpu_rgba(pct: f32) -> Vec<u8> {
+    let (p, filled) = tray_level(pct);
+    tray_bars(&[(3, 13, filled, cpu_color(p))])
+}
+
+/// トレイのアイコン(16×16)。メモリの使用率 `pct`(0〜100)を CPU と同じ形・紫の棒で描く
+pub fn tray_mem_rgba(pct: f32) -> Vec<u8> {
+    let (p, filled) = tray_level(pct);
+    tray_bars(&[(3, 13, filled, mem_color(p))])
+}
+
+/// トレイのアイコン(16×16)。左に CPU、右にメモリの細い棒を 2 本
+pub fn tray_both_rgba(cpu: f32, mem: f32) -> Vec<u8> {
+    let ((c, cf), (m, mf)) = (tray_level(cpu), tray_level(mem));
+    tray_bars(&[(2, 7, cf, cpu_color(c)), (9, 14, mf, mem_color(m))])
 }

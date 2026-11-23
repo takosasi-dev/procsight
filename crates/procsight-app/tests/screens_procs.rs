@@ -503,3 +503,318 @@ fn csv_on_picked_writes_file_and_shows_band() {
     assert_eq!(b.kind, BandKind::Danger);
     assert!(b.text.starts_with("CSV を保存できませんでした。"), "{}", b.text);
 }
+
+// ---------------------------------------------------------------- v0.4.0: 設定を読む側(担当 H)
+
+use procsight_core::config::{Config, CpuScale, DoubleClick, HeatFull, HeatStart, TreeStart, View};
+
+/// 設定を変えてから見本の Snapshot を流した状態(demo::state と同じ形。最初の Snapshot の前に設定が効く)
+fn state_with(edit: impl Fn(&mut Config)) -> State {
+    let mut cfg = Config::default();
+    cfg.touch_free.names = vec!["acegame.exe".into()];
+    cfg.columns.visible.push("threads".into());
+    edit(&mut cfg);
+    let mut st = State::new(demo::env(), cfg);
+    st.set_diagnostics(demo::diagnostics());
+    let notepad = demo::snapshot(1).rows.iter().find(|r| r.name == "notepad.exe").unwrap().id;
+    st.procs.select_only(notepad);
+    for seq in 1..=60 {
+        st.set_snapshot(Arc::new(demo::snapshot(seq)));
+    }
+    st.procs.detail.general = Load::Ready(demo::general());
+    st
+}
+
+/// 表を描いて並びを作る(refresh は crate の中だけなので、描いて呼ばせる)
+fn drawn(st: State) -> Harness<'static, State> {
+    let mut h = harness(st, true, BIG);
+    h.run_steps(2);
+    h
+}
+
+fn visible_ids(st: &State) -> Vec<procsight_core::ProcId> {
+    st.procs.visible.iter().map(|v| st.snap.rows[v.index].id).collect()
+}
+
+/// CPU の数え方「コア 1 つで 100%」: プロセスごとの数字(表・コピー・CSV・推移の文字)は ×論理 CPU の数。
+/// 並べ替えと推移の輪は掛ける前のまま。絞り込みの cpu>N は表の数字と比べる
+#[test]
+fn cpu_per_core_scales_process_numbers_only() {
+    use procsight_app::procs::cell_text;
+    use procsight_core::Column;
+    let base = demo::state();
+    let id = target(&base, "procsight-testee.exe").id;
+    let raw = base.snap.find(id).unwrap().cpu_pct.unwrap();
+    let mut st = demo::state();
+    st.cfg.cpu_scale = CpuScale::PerCore;
+    let r = st.snap.find(id).unwrap();
+    let k = st.snap.logical_cpus as f32;
+    assert_eq!(k, 8.0);
+    assert_eq!(cell_text(&st, r, Column::Cpu), format!("{:.1}%", raw * k));
+    assert_eq!(cell_text(&st, r, Column::CpuHistory), format!("{:.1}%", raw * k));
+    assert_eq!(cell_text(&base, r, Column::Cpu), format!("{raw:.1}%"), "既定は今のまま");
+    assert_eq!(st.procs.cpu_history(id).unwrap().last(), Some(raw), "推移の輪は掛ける前の値");
+    // 絞り込み: 掛けた値で比べる(raw × 8 は 50 を超え、raw は超えない)
+    assert!(raw < 50.0 && raw * k > 50.0, "{raw}");
+    let filtered = |scale: CpuScale| {
+        let mut st = demo::state();
+        st.cfg.cpu_scale = scale;
+        st.cfg.view = View::Flat;
+        st.procs.filter = "cpu>50".into();
+        visible_ids(drawn(st).state())
+    };
+    assert!(!filtered(CpuScale::Total).contains(&id));
+    assert!(filtered(CpuScale::PerCore).contains(&id));
+    // 設定を変えたら、次の Snapshot を待たずに並びを作り直す
+    let mut st = demo::state();
+    st.cfg.view = View::Flat;
+    st.procs.filter = "cpu>50".into();
+    let mut h = drawn(st);
+    assert!(!visible_ids(h.state()).contains(&id));
+    h.state_mut().cfg.cpu_scale = CpuScale::PerCore;
+    h.run_steps(2);
+    assert!(visible_ids(h.state()).contains(&id));
+    // 並べ替え(CPU の降順)の順は変わらない
+    let order = |scale: CpuScale| {
+        let mut st = demo::state();
+        st.cfg.cpu_scale = scale;
+        st.cfg.view = View::Flat;
+        st.cfg.columns.sort = procsight_core::config::SortSetting { column: "cpu".into(), descending: true };
+        visible_ids(drawn(st).state())
+    };
+    assert_eq!(order(CpuScale::Total), order(CpuScale::PerCore));
+    // CSV も表と同じ数字
+    let mut st = demo::state();
+    st.cfg.cpu_scale = CpuScale::PerCore;
+    st.cfg.view = View::Flat;
+    st.cfg.columns.set_visible_columns(&[Column::Name, Column::Pid, Column::Cpu]);
+    st.procs.filter = "pid:10000".into();
+    let h = drawn(st);
+    let (csv, n) = procsight_app::export::csv_text(h.state());
+    assert_eq!(n, 1);
+    assert!(csv.contains(&format!("\"10000\",\"{:.1}%\"", raw * k)), "{csv}");
+}
+
+#[test]
+fn s1_cpu_per_core_looks() {
+    let make = || {
+        let mut st = cpu_history_state();
+        st.cfg.cpu_scale = CpuScale::PerCore;
+        st
+    };
+    shoot("s1-cpu-per-core", BIG, make);
+    shoot_stress("s1-cpu-per-core", make);
+    // 詳細のグラフの数字: CPU を使っている procsight-testee.exe(PID 10000)を選び、60 回分ためる
+    let detail = || {
+        let mut st = state_with(|c| c.cpu_scale = CpuScale::PerCore);
+        let id = st.snap.find_pid(10_000).unwrap().id;
+        st.procs.select_only(id);
+        for seq in 61..=120 {
+            st.set_snapshot(Arc::new(demo::snapshot(seq)));
+        }
+        st
+    };
+    shoot("s1-cpu-per-core-detail", BIG, detail);
+    shoot_stress("s1-cpu-per-core-detail", detail);
+    let st = detail();
+    let raw = st.procs.detail.cpu.last().copied().unwrap();
+    assert!(raw > 1.0);
+    let h = drawn(st);
+    let want = format!("{:.1}%", raw * 8.0);
+    assert_eq!(h.query_all_by_label(&want).count(), 2, "表の行と詳細の CPU の数字が掛けた値 {want}");
+    // 推移のツールチップの今・最大・平均も掛けた数字
+    let mut h = harness(make(), true, BIG);
+    h.run_steps(3);
+    let x = h.get_by_label("CPU の推移").rect().center().x;
+    let y = h.get_all_by_label("AceGame.exe").map(|n| n.rect().center().y).fold(f32::MAX, f32::min);
+    h.hover_at(egui::pos2(x, y));
+    h.run_steps(3);
+    save(&mut h, "s1-cpu-per-core-tooltip-dark");
+    let game = target(h.state(), "AceGame.exe").id;
+    let now = h.state().procs.cpu_history(game).unwrap().last().unwrap();
+    let want = format!("今 {:.1}%", now * 8.0);
+    assert!(h.query_by_label_contains(&want).is_some(), "{want}");
+}
+
+/// 塗り始める所・一番濃くする所(既定の絵は s1-processes と同じ。ここは既定でない設定の絵)
+#[test]
+fn s1_heat_range_looks() {
+    shoot("s1-heat-high-half", BIG, || {
+        let mut st = demo::state();
+        st.cfg.heat_start = HeatStart::High;
+        st.cfg.heat_full = HeatFull::Half;
+        st
+    });
+    shoot("s1-heat-some-near", BIG, || {
+        let mut st = demo::state();
+        st.cfg.heat_start = HeatStart::Some;
+        st.cfg.heat_full = HeatFull::Near;
+        st
+    });
+}
+
+/// 行をダブルクリックする(押す・離すを 2 回)
+fn double_click_row(h: &mut Harness<'_, State>, name: &str) {
+    // kittest は押す・離すを 1 フレームずつ進めるので、ダブルクリックの間を広げる
+    h.ctx.options_mut(|o| o.input_options.max_double_click_delay = 1.0);
+    let r = h.get_all_by_label(name).map(|n| n.rect()).min_by(|a, b| a.top().total_cmp(&b.top())).unwrap();
+    // 名前の文字の少し右(開閉の印・アイコンを避ける)
+    let pos = egui::pos2(r.right() + 20.0, r.center().y);
+    h.event(egui::Event::PointerMoved(pos));
+    h.run_steps(1);
+    for pressed in [true, false, true, false] {
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+    }
+    h.run_steps(2);
+}
+
+/// ダブルクリック: 詳細(今の動き)・ファイルの場所(メニューと同じ Job。触れない・パスが無いなら何もしない)・何もしない(選ぶだけ)
+#[test]
+fn double_click_follows_setting() {
+    let make = |d: DoubleClick| {
+        let mut st = demo::state();
+        st.cfg.double_click = d;
+        st.cfg.view = View::Flat;
+        st.procs.detail.collapsed = true;
+        st
+    };
+    let opened = |st: &State| jobs(st).into_iter().filter_map(|j| if let Job::OpenLocation { path } = j { Some(path.clone()) } else { None }).collect::<Vec<_>>();
+
+    let mut h = drawn(make(DoubleClick::Details));
+    double_click_row(&mut h, "dwm.exe");
+    assert_eq!(h.state().procs.single(), Some(target(h.state(), "dwm.exe").id));
+    assert!(!h.state().procs.detail.collapsed, "詳細を開く");
+    assert!(opened(h.state()).is_empty());
+
+    let mut h = drawn(make(DoubleClick::OpenLocation));
+    double_click_row(&mut h, "dwm.exe");
+    let s = h.state();
+    let dwm = target(s, "dwm.exe").id;
+    let path = s.snap.find(dwm).unwrap().path().unwrap().to_string();
+    assert_eq!(s.procs.single(), Some(dwm), "行は選ぶ");
+    assert_eq!(opened(s), vec![path]);
+    assert!(s.procs.detail.collapsed, "詳細は開かない");
+    // 触れないプロセス(パスも無い)は何もしない
+    let mut h = drawn(make(DoubleClick::OpenLocation));
+    double_click_row(&mut h, "AceGame.exe");
+    assert_eq!(h.state().procs.single(), Some(target(h.state(), "AceGame.exe").id));
+    assert!(opened(h.state()).is_empty());
+
+    let mut h = drawn(make(DoubleClick::Nothing));
+    double_click_row(&mut h, "dwm.exe");
+    assert_eq!(h.state().procs.single(), Some(target(h.state(), "dwm.exe").id), "選ぶだけ");
+    assert!(h.state().procs.detail.collapsed && opened(h.state()).is_empty());
+}
+
+/// ツリーの最初の開き方「畳む」: 初めて見えた物だけ畳む。手で開いた物はそのまま、設定を変えても今ある物は畳み直さない
+#[test]
+fn tree_start_collapsed_folds_only_new_processes() {
+    let st = state_with(|c| c.tree_start = TreeStart::Collapsed);
+    let root = st.snap.find_pid(10_000).unwrap().id;
+    assert!(st.procs.is_folded(root), "起動して見えた物は畳む");
+    let expanded_rows = drawn(demo::state()).state().procs.visible.len();
+    let mut h = drawn(st);
+    assert!(h.state().procs.visible.len() < expanded_rows, "畳んだので行が減る");
+    // 手で開いた物は、次の Snapshot でも開いたまま
+    h.state_mut().procs.set_folded(root, false);
+    h.state_mut().set_snapshot(Arc::new(demo::snapshot(61)));
+    assert!(!h.state().procs.is_folded(root));
+    // 新しく見えた物は畳む
+    let mut next = demo::snapshot(62);
+    let mut born = next.rows.iter().find(|r| r.id == root).unwrap().clone();
+    born.id = procsight_core::ProcId { pid: 31_337, create_time: 1 };
+    next.rows.push(born.clone());
+    h.state_mut().set_snapshot(Arc::new(next));
+    assert!(h.state().procs.is_folded(born.id));
+    // 一覧から消えたら畳みの印も消す
+    h.state_mut().set_snapshot(Arc::new(demo::snapshot(63)));
+    assert!(!h.state().procs.auto_collapsed.contains(&born.id));
+
+    // 既定(開く)のまま見えた物は、あとで「畳む」にしても畳み直さない。その後の新入りは畳む
+    let mut h = drawn(demo::state());
+    assert!(h.state().procs.collapsed.is_empty() && h.state().procs.auto_collapsed.is_empty());
+    h.state_mut().cfg.tree_start = TreeStart::Collapsed;
+    h.run_steps(1);
+    let mut next = demo::snapshot(61);
+    let mut born2 = next.rows.iter().find(|r| r.name == "dwm.exe").unwrap().clone();
+    born2.id = procsight_core::ProcId { pid: 31_338, create_time: 1 };
+    next.rows.push(born2.clone());
+    h.state_mut().set_snapshot(Arc::new(next));
+    let p = &h.state().procs;
+    assert!(!p.is_folded(root) && p.is_folded(born2.id));
+    // 「開く」に戻した後の新入りは開いたまま
+    h.state_mut().cfg.tree_start = TreeStart::Expanded;
+    h.run_steps(1);
+    let mut next = demo::snapshot(62);
+    let mut born3 = born2.clone();
+    born3.id = procsight_core::ProcId { pid: 31_339, create_time: 1 };
+    next.rows.push(born3.clone());
+    h.state_mut().set_snapshot(Arc::new(next));
+    assert!(!h.state().procs.is_folded(born3.id));
+}
+
+/// 「畳む」で畳んだ親の下でも、絞り込みに一致した行の数を見る(tree.rs の動きの確かめ。報告用に数を出す)
+#[test]
+fn tree_start_collapsed_with_filter() {
+    let count = |tree_start: TreeStart| {
+        let mut st = state_with(|c| c.tree_start = tree_start);
+        st.procs.filter = "testee".into();
+        let h = drawn(st);
+        h.state().procs.visible.iter().filter(|v| !v.dimmed).count()
+    };
+    let (open, folded) = (count(TreeStart::Expanded), count(TreeStart::Collapsed));
+    println!("絞り込み testee の一致: 開く {open} 行、畳む {folded} 行");
+    assert_eq!(open, 13);
+    assert_eq!(folded, 13, "絞り込みの間は「全部畳む」で畳んだ物を見ない");
+    // 手で畳んだ物は v0.3.0 と同じに、絞り込みの間も畳んだまま(畳んだ親の下の一致は隠れる)
+    let mut st = state_with(|c| c.tree_start = TreeStart::Expanded);
+    let root = st.snap.find_pid(10_000).unwrap().id;
+    st.procs.set_folded(root, true);
+    st.procs.filter = "testee".into();
+    let h = drawn(st);
+    assert!(h.state().procs.visible.iter().filter(|v| !v.dimmed).count() < 13);
+    assert!(h.state().procs.is_folded(root));
+}
+
+#[test]
+fn s1_tree_start_collapsed_looks() {
+    shoot("s1-tree-collapsed-start", BIG, || state_with(|c| c.tree_start = TreeStart::Collapsed));
+}
+
+/// グラフの長さ: CPU の推移・詳細のグラフの輪が設定の長さまで伸びる。減らすと古い方を捨てる
+#[test]
+fn graph_points_resize_history_rings() {
+    // cpu_history_state(120 回分)の後で 300 にし、さらに 240 回流す
+    let long = || {
+        let mut st = cpu_history_state();
+        st.cfg.graph_points = 300;
+        st.procs.follow_config(&st.cfg);
+        for seq in 121..=360u64 {
+            let mut s = demo::snapshot(seq);
+            let t = seq as f32;
+            for r in s.rows.iter_mut().filter(|r| r.id.pid != 0) {
+                if let Some(c) = r.cpu_pct.as_mut() {
+                    *c = (*c + 20.0 * (t * 0.05 + r.id.pid as f32).sin()).max(0.0);
+                }
+            }
+            st.set_snapshot(Arc::new(s));
+        }
+        st
+    };
+    let mut st = long();
+    let id = target(&st, "browser.exe").id;
+    assert_eq!(st.procs.cpu_history(id).unwrap().len(), 300);
+    assert_eq!(st.procs.detail.cpu.capacity(), 300);
+    assert_eq!(st.procs.detail.cpu.len(), 240, "選んだ後の 240 回");
+    let tail: Vec<f32> = st.procs.cpu_history(id).unwrap().skip(240).collect();
+    st.cfg.graph_points = 60;
+    st.procs.follow_config(&st.cfg);
+    assert_eq!(st.procs.cpu_history(id).unwrap().collect::<Vec<_>>(), tail, "新しい 60 回を残す");
+    assert_eq!(st.procs.detail.mem.len(), 60);
+    // 描く度に設定へ合わせる(設定の画面は値を変えるだけ)
+    let mut h = drawn(long());
+    h.state_mut().cfg.graph_points = 120;
+    h.run_steps(1);
+    assert_eq!(h.state().procs.cpu_history(id).unwrap().len(), 120);
+    shoot("s1-graph-300", BIG, long);
+}

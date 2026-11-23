@@ -4,7 +4,7 @@
 
 use eframe::egui;
 use egui::{Color32, Context, ThemePreference, Ui};
-use procsight_core::config::Theme;
+use procsight_core::config::{Accent, HeatFull, HeatStart, Theme};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
@@ -90,17 +90,58 @@ pub mod size {
 
 /// 使用量(0〜1)の塗り。0.02 未満は塗らない。間は heat_lo → heat_hi を直線で混ぜる
 pub fn heat(p: &Palette, frac: f32) -> Option<Color32> {
-    if !frac.is_finite() || frac < 0.02 {
+    heat_range(p, frac, HeatStart::Any.frac(), HeatFull::Max.frac())
+}
+
+/// 使用量(0〜1)の塗り(v0.4.0 の設定の「塗り始める所」「一番濃くする所」)。start 未満は塗らない。
+/// start で一番薄く、full で一番濃い。既定(0.02・1.0)の色は heat と同じ
+pub fn heat_range(p: &Palette, frac: f32, start: f32, full: f32) -> Option<Color32> {
+    if !frac.is_finite() || frac < start {
         return None;
     }
-    let t = frac.clamp(0.0, 1.0);
+    // 既定のときは v0.3.0 の色のまま(0.02 から 1.0 へ、0 を起点に混ぜる)
+    let t = if start <= HeatStart::Any.frac() { frac / full } else { (frac - start) / (full - start).max(1e-3) }.clamp(0.0, 1.0);
     let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
     Some(Color32::from_rgb(mix(p.heat_lo.r(), p.heat_hi.r()), mix(p.heat_lo.g(), p.heat_hi.g()), mix(p.heat_lo.b(), p.heat_hi.b())))
 }
 
-/// 今の egui の見た目(ダークかライトか)に合う組
+/// 強調の色(ダーク, ライト, 選んだ行のダーク, 選んだ行のライト)。青は v0.3.0 までの色
+fn accent_colors(a: Accent) -> [Color32; 4] {
+    let c = Color32::from_rgb;
+    match a {
+        Accent::Blue => [DARK.accent, LIGHT.accent, DARK.selected, LIGHT.selected],
+        Accent::Teal => [c(0x3C, 0xD0, 0xC8), c(0x0A, 0x7A, 0x74), c(0x17, 0x4D, 0x4A), c(0xC2, 0xEC, 0xE8)],
+        Accent::Green => [c(0x6C, 0xD0, 0x7C), c(0x1E, 0x7A, 0x34), c(0x22, 0x4D, 0x2C), c(0xCC, 0xEE, 0xD4)],
+        Accent::Orange => [c(0xFF, 0xA6, 0x4D), c(0xB0, 0x52, 0x00), c(0x5A, 0x3A, 0x14), c(0xFA, 0xE0, 0xC4)],
+        Accent::Pink => [c(0xFF, 0x7E, 0xB6), c(0xB0, 0x2A, 0x6E), c(0x5A, 0x25, 0x40), c(0xF8, 0xD2, 0xE4)],
+        Accent::Purple => [c(0xB4, 0x8C, 0xFF), c(0x6A, 0x3D, 0xC0), c(0x3E, 0x2D, 0x66), c(0xE2, 0xD6, 0xF8)],
+    }
+}
+
+/// ダークかライトの組に強調の色を入れる。青なら DARK・LIGHT そのまま
+pub fn palette_for(dark: bool, accent: Accent) -> Palette {
+    let mut p = if dark { DARK } else { LIGHT };
+    if accent != Accent::Blue {
+        let [ad, al, sd, sl] = accent_colors(accent);
+        p.accent = if dark { ad } else { al };
+        p.selected = if dark { sd } else { sl };
+        p.graph = p.accent;
+        // 橙は 2 本目の線(送信・書き込み・熱い推移)の橙と見分けられないので、2 本目を青にする
+        if accent == Accent::Orange {
+            p.graph2 = if dark { DARK.graph } else { LIGHT.graph };
+        }
+    }
+    p
+}
+
+fn accent_id() -> egui::Id {
+    egui::Id::unique("procsight-accent")
+}
+
+/// 今の egui の見た目(ダークかライトか)と、apply で入れた強調の色に合う組
 pub fn palette(ui: &Ui) -> Palette {
-    if ui.visuals().dark_mode { DARK } else { LIGHT }
+    let accent = ui.ctx().data(|d| d.get_temp::<Accent>(accent_id())).unwrap_or_default();
+    palette_for(ui.visuals().dark_mode, accent)
 }
 
 pub fn preference(theme: Theme) -> ThemePreference {
@@ -111,10 +152,12 @@ pub fn preference(theme: Theme) -> ThemePreference {
     }
 }
 
-/// テーマと文字の大きさを渡す。変わったときだけ呼ぶ
-pub fn apply(ctx: &Context, theme: Theme, font_scale: f32) {
+/// テーマ・文字の大きさ・強調の色を渡す。変わったときだけ呼ぶ
+pub fn apply(ctx: &Context, theme: Theme, font_scale: f32, accent: Accent) {
     ctx.set_theme(preference(theme));
-    for (dark, p) in [(true, DARK), (false, LIGHT)] {
+    ctx.data_mut(|d| d.insert_temp(accent_id(), accent));
+    for dark in [true, false] {
+        let p = palette_for(dark, accent);
         let t = if dark { egui::Theme::Dark } else { egui::Theme::Light };
         ctx.style_mut_of(t, |s| {
             s.visuals.selection.bg_fill = p.selected;
@@ -140,5 +183,33 @@ mod tests {
         assert_eq!(heat(&LIGHT, 5.0), Some(LIGHT.heat_hi));
         let mid = heat(&LIGHT, 0.5).unwrap();
         assert!(mid.g() < LIGHT.heat_lo.g() && mid.g() > LIGHT.heat_hi.g());
+    }
+
+    #[test]
+    fn heat_range_moves_both_ends() {
+        // 既定は heat と同じ
+        for f in [0.0, 0.01, 0.02, 0.3, 0.7, 1.0, 2.0] {
+            assert_eq!(heat_range(&DARK, f, 0.02, 1.0), heat(&DARK, f));
+        }
+        assert_eq!(heat_range(&DARK, 0.3, 0.35, 1.0), None, "塗り始めの手前は塗らない");
+        assert_eq!(heat_range(&DARK, 0.35, 0.35, 1.0), Some(DARK.heat_lo), "塗り始めは一番薄い");
+        assert_eq!(heat_range(&DARK, 0.5, 0.02, 0.5), Some(DARK.heat_hi), "半分で一番濃い");
+        assert_eq!(heat_range(&DARK, 0.75, 0.15, 0.75), Some(DARK.heat_hi));
+    }
+
+    #[test]
+    fn accent_blue_is_the_old_palette_and_others_differ() {
+        for dark in [true, false] {
+            let base = if dark { DARK } else { LIGHT };
+            let blue = palette_for(dark, Accent::Blue);
+            assert_eq!((blue.accent, blue.selected, blue.graph), (base.accent, base.selected, base.graph));
+            for a in &Accent::ALL[1..] {
+                let p = palette_for(dark, *a);
+                assert_ne!(p.accent, base.accent, "{a:?}");
+                assert_eq!(p.graph, p.accent);
+                assert_eq!(p.danger, base.danger, "強調以外は変えない");
+                assert_ne!(p.graph, p.graph2, "2 本の線は別の色");
+            }
+        }
     }
 }

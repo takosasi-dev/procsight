@@ -5,7 +5,6 @@
 use eframe::egui;
 use crate::app::{Load, State};
 use crate::dialogs::Dialog;
-use crate::perf::sparkline;
 use crate::theme::{self, size, space};
 use crate::widgets;
 use egui::{Align, Layout, RichText, Sense, Ui};
@@ -353,17 +352,20 @@ fn general(st: &mut State, ui: &mut Ui, r: &procsight_core::ProcessRow) {
             // h を超えるとパネルが伸び、伸びた h でまたグラフが伸びるので、必ず h の内に収める
             let sy = ui.spacing().item_spacing.y;
             let gh = ((h - 2.0 * 26.0 - space::L - 4.0 * sy) / 2.0 - 1.0).floor().min(160.0);
-            let cpu_now = format::pct(d.cpu.last().copied());
+            // CPU は設定の数え方で(輪は掛ける前の値。上端も同じだけ掛けるので線の形は変わらない)
+            let k = crate::procs::cpu_factor(st);
+            let cpu_now = format::pct(d.cpu.last().map(|v| v * k));
             let mem_now = format::opt_bytes(d.mem.last().map(|v| *v as u64));
+            let points = st.cfg.graph_points;
             if gh < 32.0 {
                 // パネルが低いときはグラフを省き、今の値だけ(パネルを押し広げて表を潰さない)
                 graph_title(ui, &pal, "CPU", &cpu_now, graph_w, pal.graph);
                 graph_title(ui, &pal, "メモリ", &mem_now, graph_w, pal.graph2);
             } else {
-                graph(ui, &pal, "CPU", &cpu_now, d.cpu.iter().copied(), 100.0, egui::vec2(graph_w, gh), pal.graph);
+                graph(ui, &pal, "CPU", &cpu_now, d.cpu.iter().map(|v| v * k), 100.0 * k, points, egui::vec2(graph_w, gh), pal.graph);
                 ui.add_space(space::L);
                 let mem_max = d.mem.iter().copied().fold(1.0f32, f32::max) * 1.2;
-                graph(ui, &pal, "メモリ", &mem_now, d.mem.iter().copied(), mem_max, egui::vec2(graph_w, gh), pal.graph2);
+                graph(ui, &pal, "メモリ", &mem_now, d.mem.iter().copied(), mem_max, points, egui::vec2(graph_w, gh), pal.graph2);
             }
         });
     });
@@ -388,11 +390,30 @@ fn graph_title(ui: &mut Ui, pal: &theme::Palette, name: &str, now: &str, w: f32,
     });
 }
 
-/// 全般の右のグラフ 1 つ(FR-37)
+/// 全般の右のグラフ 1 つ(FR-37)。横軸は設定のグラフの長さ(points 回)。
+/// パフォーマンスの小さなグラフと同じ絵(地・縁・線)を、設定のグラフの長さで描く
 #[allow(clippy::too_many_arguments)]
-fn graph(ui: &mut Ui, pal: &theme::Palette, name: &str, now: &str, values: impl Iterator<Item = f32>, max: f32, size_: egui::Vec2, color: egui::Color32) {
+fn graph(
+    ui: &mut Ui,
+    pal: &theme::Palette,
+    name: &str,
+    now: &str,
+    values: impl ExactSizeIterator<Item = f32>,
+    max: f32,
+    points: usize,
+    size_: egui::Vec2,
+    color: egui::Color32,
+) {
     graph_title(ui, pal, name, now, size_.x, color);
-    sparkline(ui, values, max, size_, color);
+    let (rect, _) = ui.allocate_exact_size(size_, Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 3.0, pal.surface);
+    painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0, pal.border), egui::StrokeKind::Inside);
+    if max <= 0.0 {
+        return;
+    }
+    let y = |v: f32| if v.is_finite() { (v / max).clamp(0.0, 1.0) } else { 0.0 };
+    crate::procs::paint_spark(&painter, rect.shrink2(egui::vec2(1.0, 2.0)), values, points, y, color, widgets::tint(color, 48), 1.5);
 }
 
 /// D-20: 開始アドレスに DLL の名前を添える(DLL の一覧を取ってあれば)

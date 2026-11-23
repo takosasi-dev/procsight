@@ -13,12 +13,12 @@ A process manager for Windows 11 that replaces the built-in Task Manager. It is 
   - Filter syntax: combine `cpu>5`, `mem>1gb`, `gpu>10`, `io>1mb`, `pid:1234`, `user:system`, `state:hung` and plain words
   - System Idle Process always sorts to the bottom
   - Row height (compact, normal, comfortable)
-  - "CPU の推移" (CPU history) column: a small graph of the last 60 samples per process
+  - "CPU の推移" (CPU history) column: a small graph of the recent samples per process
   - Save the list as CSV (opens in Excel; values that look like formulas are neutralised)
 - **Actions**: end process, end process tree, end several at once, priority (Idle to High), CPU affinity, efficiency mode, suspend and resume, bring to front, open file location, properties
 - **Details**: general (path, command line, parent, user, elevation, integrity level, architecture), threads, DLLs, handles, signature (verified without network access), small CPU and memory graphs
 - **Find what locks a file**: drop a file that "is in use" to see which processes hold it
-- **Performance**: CPU (total and per logical processor), memory, disks, network adapters and GPUs (last 60 samples)
+- **Performance**: CPU (total and per logical processor), memory, disks, network adapters and GPUs (last 60, 120 or 300 samples)
   - CPU topology (sockets, cores, logical processors, L1 to L3 cache) and memory breakdown (cached, paged pool, non-paged pool)
   - Top 5 processes using the selected resource; click one to jump to it on the Processes tab
 - **Mini view** (Ctrl+M): a small window with only CPU, memory, GPU, disk and network. Combine it with "always on top" to keep it next to a game or on another monitor
@@ -27,7 +27,8 @@ A process manager for Windows 11 that replaces the built-in Task Manager. It is 
 - **Startup**: enable or disable registry Run entries and startup folder items, recorded the same way Task Manager does, so both tools show the same state. Logon and boot tasks in Task Scheduler (enable or disable) and Store app startup tasks (view only) are listed too
 - **Services**: start, stop, restart and change the start type; running dependent services are listed before stopping
 - **Replace Task Manager** (off by default): open ProcSight with Ctrl+Shift+Esc and from the Ctrl+Alt+Del screen
-- Dark and light themes, font size, optional tray icon with CPU usage, keyboard shortcuts (Delete, Ctrl+F, Ctrl+1 to Ctrl+4, Ctrl+C, Ctrl+K, Ctrl+M, F1)
+- Dark and light themes, six accent colors, font size, optional tray icon with CPU and/or memory usage, keyboard shortcuts (Delete, Ctrl+F, Ctrl+1 to Ctrl+4, Ctrl+C, Ctrl+K, Ctrl+M, F1)
+- **Settings** (all off or unchanged by default): tab to open at start (or the last one), start in the mini view or hidden in the tray, what the mini view shows, per-process CPU counted per core (100% = one logical processor), graph length, speeds in bits (Mbps), double-click action, start the tree collapsed, and where usage shading starts and peaks
 
 ![CPU graphs](docs/images/s2-cpu-cores-dark.png)
 
@@ -37,12 +38,32 @@ A process manager for Windows 11 that replaces the built-in Task Manager. It is 
 
 ![Mini view](docs/images/mini-dark.png)
 
+![Settings: table and graphs](docs/images/s5-settings-table-dark.png)
+
 ## What ProcSight does not do
 
 - **No network access at all**: no update checks, telemetry, online lookups or certificate revocation checks.
-- **No history**: graphs and the per-process "CPU の推移" (CPU history) column keep only the last 60 samples in memory, and the history of an exited process is dropped at once.
+- **No history**: graphs and the per-process "CPU の推移" (CPU history) column keep only the last 60 samples (120 or 300 if chosen) in memory, and the history of an exited process is dropped at once.
 - **Critical processes cannot be ended or suspended**: Windows core processes (System, csrss.exe, lsass.exe and others), processes marked critical, and ProcSight itself.
 - No realtime priority, dumps, closing other processes' handles, or reading and writing other processes' memory.
+
+## Resource usage compared with Task Manager
+
+Measured on 2026-11-23 on one PC (Core i7-11700F, 16 logical processors, 32 GB RAM, Windows 11 build 26220). ProcSight v0.3.0 with the default settings and Windows Task Manager, both on the Processes tab and refreshing once per second. Each was sampled every 2 seconds for 45 seconds after warming up, twice; the table shows the range of the two runs.
+
+| | ProcSight v0.3.0 | Task Manager |
+|---|---|---|
+| CPU (share of the whole machine) | 0.13–0.18% | 1.1–1.6% |
+| CPU (100% = one logical processor) | 2.1–2.9% | 17.7–25.2% |
+| Working set | 186 MB | 222–225 MB |
+| Private bytes | 388 MB | 160–162 MB |
+| Threads / handles | 32 / 830 | 33–34 / 1,160 |
+| Time until the window appears | 43–136 ms | not measured |
+
+- ProcSight used about 6 to 12 times less CPU and a somewhat smaller working set.
+- ProcSight committed more private memory (about 2.4 times), probably for GPU rendering and the Japanese font; this has not been investigated yet.
+- The conditions were not identical: Task Manager raised itself to administrator and stayed in the background, while ProcSight ran with standard rights in the foreground (always on top). Task Manager allows only one window, so its start time was not measured.
+- v0.4.0 only adds settings; with the default settings it does the same work as v0.3.0.
 
 ## Touch-free processes (for gamers)
 
@@ -116,7 +137,7 @@ UI tests render without creating a window (egui_kittest). `procsight-testee` is 
 
 ## Status
 
-v0.3.0 is a pre-release. The UI is verified with windowless rendering tests, but not yet by hands-on use. The automated tests (about 210) and checks with standard user rights pass. Administrator operations (services, all-users startup items, replacing Task Manager) and comparisons with Task Manager's numbers are still waiting for hands-on verification.
+v0.4.0 is a pre-release. The UI is verified with windowless rendering tests, but the new settings are not yet verified by hands-on use. The automated tests (about 245) and checks with standard user rights pass. Administrator operations (services, all-users startup items, replacing Task Manager) and comparisons with Task Manager's numbers are still waiting for hands-on verification. Resource usage compared with Task Manager is shown above.
 
 ## License
 

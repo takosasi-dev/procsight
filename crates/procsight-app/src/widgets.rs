@@ -1,7 +1,7 @@
 //! 画面の間で共有する小さな部品(v0.2.0)。色は theme::Palette の役割、余白と文字は theme::space / theme::size だけを使う。
 //! 絵文字は使わない(印は図形を描く)。
 
-use crate::theme::{self, Palette, size, space};
+use crate::theme::{Palette, size, space};
 use eframe::egui;
 use egui::{Align2, Color32, CornerRadius, FontId, Margin, Rect, Response, RichText, Sense, Stroke, Ui, Vec2};
 
@@ -97,13 +97,6 @@ pub fn danger_button(pal: &Palette, text: &str) -> egui::Button<'static> {
 pub fn primary_button(pal: &Palette, text: &str) -> egui::Button<'static> {
     let fg = if pal.accent.r() as u32 + pal.accent.g() as u32 + pal.accent.b() as u32 > 450 { Color32::BLACK } else { Color32::WHITE };
     egui::Button::new(RichText::new(text.to_string()).color(fg).strong()).fill(pal.accent)
-}
-
-/// 使用量の塗りを rect に描く(theme::heat が None なら何もしない)
-pub fn paint_heat(ui: &Ui, rect: Rect, pal: &Palette, frac: f32) {
-    if let Some(c) = theme::heat(pal, frac) {
-        ui.painter().rect_filled(rect, 0.0, c);
-    }
 }
 
 /// 上のタブ。選んでいる物は強調の色の下線。badge は右に小さく出す件数

@@ -2379,7 +2379,7 @@ dependencies = [
 
 [[package]]
 name = "procsight-app"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "eframe",
  "egui_extras",
@@ -2393,7 +2393,7 @@ dependencies = [
 
 [[package]]
 name = "procsight-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "toml",
@@ -2401,7 +2401,7 @@ dependencies = [
 
 [[package]]
 name = "procsight-probe"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "procsight-core",
  "procsight-win",
@@ -2409,7 +2409,7 @@ dependencies = [
 
 [[package]]
 name = "procsight-testee"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "procsight-core",
  "procsight-win",
@@ -2418,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "procsight-uiprobe"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "eframe",
  "egui_extras",
@@ -2427,7 +2427,7 @@ dependencies = [
 
 [[package]]
 name = "procsight-win"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "procsight-core",
  "windows",

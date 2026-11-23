@@ -9,12 +9,12 @@ use crate::theme::{self, Palette, size, space};
 use crate::{details, log, widgets};
 use egui::{Align, Align2, Color32, FontId, Key, Layout, Modifiers, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use egui_extras::TableBuilder;
-use procsight_core::config::{Config, View};
+use procsight_core::config::{Config, DoubleClick, TreeStart, View};
 use procsight_core::filter::{self, Query, Scope, SortValue};
 use procsight_core::format;
 use procsight_core::rules;
 use procsight_core::tree::{self, Forest, VisibleRow};
-use procsight_core::ring::{GRAPH_POINTS, Ring};
+use procsight_core::ring::Ring;
 use procsight_core::{Column, Priority, ProcId, ProcState, ProcessRow, Snapshot};
 use procsight_win::jobs::{Job, Target};
 use std::collections::{HashMap, HashSet};
@@ -80,6 +80,13 @@ fn heat_frac(mem_total: Option<u64>, r: &ProcessRow, c: Column) -> Option<f32> {
     }
 }
 
+/// 使用量の塗りを rect に。range は設定の(塗り始める所, 一番濃くする所)。既定(0.02・1.0)なら widgets::paint_heat と同じ色
+fn paint_heat(ui: &Ui, rect: Rect, pal: &Palette, range: (f32, f32), frac: f32) {
+    if let Some(c) = theme::heat_range(pal, frac, range.0, range.1) {
+        ui.painter().rect_filled(rect, 0.0, c);
+    }
+}
+
 /// CPU の推移の縦の位置(0〜1)。目盛りは全部の行で 0〜100% に固定し、使用量の塗り(heat_frac)と同じ平方根で曲げる。
 /// 行ごとの最大に合わせると 0.5% の揺れと 90% の山が同じ高さに見え、行どうしを見比べられない。
 /// 直線の 0〜100% だと数 % の行が底に張り付く。平方根なら 1% が 1 割、25% が半分の高さで、両方を満たす
@@ -96,23 +103,37 @@ fn spark_color(pal: &Palette, now_pct: f32) -> Color32 {
 /// 折れ線を橙にする今の CPU(%)。CPU の列の塗りがはっきり橙に見え始める辺り
 const SPARK_HOT: f32 = 15.0;
 
-/// 小さな折れ線と、その下の薄い塗り(左が古く、右が今。60 回に満たない間は右に寄せる)。値は CPU の %(spark_y で縦に)。
-/// perf.rs の paint_line と同じ形
-fn paint_spark(painter: &egui::Painter, rect: Rect, vals: impl ExactSizeIterator<Item = f32>, color: Color32, fill: Color32) {
-    let len = vals.len().min(GRAPH_POINTS);
+/// 小さな折れ線と、その下の薄い塗り(左が古く、右が今。points 回に満たない間は右に寄せる)。y は値 → 縦の位置(0〜1)。
+/// perf.rs の paint_line と同じ形。points は設定のグラフの長さ。詳細パネルのグラフも使う
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_spark(
+    painter: &egui::Painter,
+    rect: Rect,
+    vals: impl ExactSizeIterator<Item = f32>,
+    points: usize,
+    y: impl Fn(f32) -> f32,
+    color: Color32,
+    fill: Color32,
+    width: f32,
+) {
+    let points = points.max(2);
+    let total = vals.len();
+    let len = total.min(points);
     if len < 2 || rect.width() < 4.0 {
         return;
     }
-    let n = (GRAPH_POINTS - 1) as f32;
-    let start = GRAPH_POINTS - len;
+    let n = (points - 1) as f32;
+    let start = points - len;
+    // 輪の方が長い(長さを変えた直後)ときは新しい方の points 回分
+    let vals = vals.skip(total - len);
     let mut pts = Vec::with_capacity(len);
     // 塗りは 1 枚の網で(区切りごとの多角形だと、境目に細い線が見える。中がへこんだ形なので凸の多角形は使えない)
     let mut mesh = egui::Mesh::default();
     mesh.reserve_vertices(len * 2);
     mesh.reserve_triangles((len - 1) * 2);
-    for (i, v) in vals.take(len).enumerate() {
+    for (i, v) in vals.enumerate() {
         let x = rect.left() + (start + i) as f32 / n * rect.width();
-        let p = egui::pos2(x, rect.bottom() - spark_y(v) * rect.height());
+        let p = egui::pos2(x, rect.bottom() - y(v) * rect.height());
         pts.push(p);
         mesh.colored_vertex(p, fill);
         mesh.colored_vertex(egui::pos2(x, rect.bottom()), fill);
@@ -123,7 +144,7 @@ fn paint_spark(painter: &egui::Painter, rect: Rect, vals: impl ExactSizeIterator
         }
     }
     painter.add(egui::Shape::mesh(mesh));
-    painter.add(egui::Shape::line(pts, Stroke::new(1.25, color)));
+    painter.add(egui::Shape::line(pts, Stroke::new(width, color)));
 }
 
 /// CPU の推移の列のセル。マウスを置くと今・最大・平均を出す
@@ -142,13 +163,15 @@ fn cpu_spark_cell(st: &State, ui: &mut Ui, pal: &Palette, r: &ProcessRow, row_re
         spark_color(pal, now)
     };
     let fill = widgets::tint(color, if selected { 56 } else { 44 });
-    paint_spark(ui.painter(), rect, h.vals.iter().copied(), color, fill);
+    paint_spark(ui.painter(), rect, h.vals.iter().copied(), st.procs.points, spark_y, color, fill, 1.25);
     let resp = ui.interact(rect, ui.scope_id().with(("cpu_spark", r.id)), Sense::hover());
     resp.on_hover_ui(|ui| {
         let n = h.vals.len().max(1);
         let avg = h.vals.iter().sum::<f32>() / n as f32;
+        // 数字だけ設定の数え方で(線の形と色は掛ける前の値)
+        let k = cpu_factor(st);
         ui.label(RichText::new(format!("CPU の推移(直近 {} 回)", h.vals.len())).strong());
-        ui.label(format!("今 {}  最大 {}  平均 {}", format::pct(Some(now)), format::pct(Some(max)), format::pct(Some(avg))));
+        ui.label(format!("今 {}  最大 {}  平均 {}", format::pct(Some(now * k)), format::pct(Some(max * k)), format::pct(Some(avg * k))));
     });
 }
 
@@ -160,7 +183,14 @@ struct ListKey {
     col: Column,
     desc: bool,
     tree: bool,
+    /// CPU の数え方(絞り込みの cpu>N を表の数字と比べる)
+    cpu_factor: f32,
     generation: u64,
+}
+
+/// プロセスごとの CPU の数字に掛ける数(設定の「CPU の数え方」。全体の CPU には掛けない)
+pub fn cpu_factor(st: &State) -> f32 {
+    st.cfg.cpu_factor(st.snap.logical_cpus)
 }
 
 pub struct ProcsView {
@@ -170,6 +200,8 @@ pub struct ProcsView {
     pub selected: Vec<ProcId>,
     anchor: Option<ProcId>,
     pub collapsed: HashSet<ProcId>,
+    /// 設定「ツリーで新しく見えたプロセス: 全部畳む」で畳んだ物(v0.4.0)。絞り込みの間は見ない(一致した子が隠れるため)
+    pub auto_collapsed: HashSet<ProcId>,
     key: Option<ListKey>,
     generation: u64,
     pub visible: Vec<VisibleRow>,
@@ -186,6 +218,10 @@ pub struct ProcsView {
     cpu_total_hist: Ring<f32>,
     /// 最後に推移を進めた Snapshot の seq
     hist_seq: u64,
+    /// 設定の写し(on_snapshot には cfg が来ないので、refresh・ui で合わせる)。グラフの長さ
+    points: usize,
+    /// 設定の写し。ツリーで初めて見えたプロセスを畳むか
+    tree_start: TreeStart,
 }
 
 /// 1 つのプロセスの CPU の推移
@@ -196,26 +232,68 @@ struct CpuHist {
 }
 
 impl ProcsView {
-    pub fn new(_cfg: &Config) -> ProcsView {
-        ProcsView {
+    /// ツリーで畳んで描く識別子。絞り込みの間(no_filter が false)は「全部畳む」で畳んだ物を除く
+    fn folded_set(&self, no_filter: bool) -> HashSet<ProcId> {
+        if no_filter && !self.auto_collapsed.is_empty() { self.collapsed.union(&self.auto_collapsed).copied().collect() } else { self.collapsed.clone() }
+    }
+
+    /// 今その行が畳まれて見えているか(folded_set と同じ決まり)
+    pub fn is_folded(&self, id: ProcId) -> bool {
+        self.collapsed.contains(&id) || (self.filter.trim().is_empty() && self.auto_collapsed.contains(&id))
+    }
+
+    /// 畳む・開く。開くときは「全部畳む」で畳んだ印も外す
+    pub fn set_folded(&mut self, id: ProcId, fold: bool) {
+        if fold {
+            self.collapsed.insert(id);
+        } else {
+            self.collapsed.remove(&id);
+            self.auto_collapsed.remove(&id);
+        }
+    }
+
+    pub fn new(cfg: &Config) -> ProcsView {
+        let mut v = ProcsView {
             query: Default::default(),
             totals: HeaderTotals::default(),
             cpu_hist: HashMap::new(),
             cpu_total_hist: Ring::default(),
             hist_seq: 0,
+            points: 0,
+            tree_start: cfg.tree_start,
             filter: String::new(),
             scope: Scope::All,
             focus_filter: false,
             selected: Vec::new(),
             anchor: None,
             collapsed: HashSet::new(),
+            auto_collapsed: HashSet::new(),
             key: None,
             generation: 0,
             visible: Vec::new(),
             forest: Forest::default(),
             scroll_to: None,
             detail: details::DetailState::default(),
+        };
+        v.follow_config(cfg);
+        v
+    }
+
+    /// 設定の写しを合わせる。グラフの長さが変わったら、推移と詳細のグラフの輪を同じ長さにする
+    /// (減らすと古い方を捨てる)。設定の画面は値を変えるだけで知らせないので、描く度に呼ぶ
+    pub fn follow_config(&mut self, cfg: &Config) {
+        self.tree_start = cfg.tree_start;
+        let n = cfg.graph_points;
+        if self.points == n {
+            return;
         }
+        self.points = n;
+        for h in self.cpu_hist.values_mut() {
+            h.vals.set_capacity(n);
+        }
+        self.cpu_total_hist.set_capacity(n);
+        self.detail.cpu.set_capacity(n);
+        self.detail.mem.set_capacity(n);
     }
 
     pub fn invalidate(&mut self) {
@@ -240,8 +318,16 @@ impl ProcsView {
         if snap.rows_stale {
             return;
         }
+        let (points, fold_new) = (self.points, self.tree_start == TreeStart::Collapsed);
         for r in snap.rows.iter().filter(|r| r.is_gone == 0) {
-            let h = self.cpu_hist.entry(r.id).or_insert_with(|| CpuHist { seen: 0, vals: Ring::default() });
+            // 推移の鍵は「見たことのある識別子」も兼ねる。初めて見えた物は、設定が「畳む」ならツリーで畳む
+            // (既に見た物・設定を変える前からある物は触らない)
+            let h = self.cpu_hist.entry(r.id).or_insert_with(|| {
+                if fold_new {
+                    self.auto_collapsed.insert(r.id);
+                }
+                CpuHist { seen: 0, vals: Ring::new(points) }
+            });
             h.seen = snap.seq;
             // 触れないプロセスも SPI の値なので足す。値が無い周(最初の 1 回など)は足さない
             if let Some(c) = r.cpu_pct.filter(|c| c.is_finite()) {
@@ -249,6 +335,12 @@ impl ProcsView {
             }
         }
         self.cpu_hist.retain(|_, h| h.seen == snap.seq);
+        // 一覧から消えた識別子は畳みの印も消す(畳むが既定だと増え続けるため)
+        if !self.collapsed.is_empty() || !self.auto_collapsed.is_empty() {
+            let ids: HashSet<ProcId> = snap.rows.iter().map(|r| r.id).collect();
+            self.collapsed.retain(|id| ids.contains(id));
+            self.auto_collapsed.retain(|id| ids.contains(id));
+        }
     }
 
     /// CPU の推移(古い順)。テストと CSV の確かめに使う
@@ -299,7 +391,7 @@ pub fn cell_text(st: &State, r: &ProcessRow, c: Column) -> String {
         Column::Name => display_name(st, r),
         Column::Pid => r.id.pid.to_string(),
         Column::State => r.state.label().into(),
-        Column::Cpu => format::pct(r.cpu_pct),
+        Column::Cpu => cpu_text(st, r),
         Column::Mem => format::opt_bytes(r.mem),
         Column::WorkingSet => format::bytes(r.working_set),
         Column::Commit => format::bytes(r.commit),
@@ -320,8 +412,13 @@ pub fn cell_text(st: &State, r: &ProcessRow, c: Column) -> String {
         }
         Column::ParentPid => r.parent_pid.to_string(),
         // コピーと CSV では今の CPU を出す(表では cpu_spark_cell が折れ線を描く)
-        Column::CpuHistory => format::pct(r.cpu_pct),
+        Column::CpuHistory => cpu_text(st, r),
     }
+}
+
+/// プロセスの CPU の文字(設定の数え方を掛ける。表・コピー・CSV で同じ)
+fn cpu_text(st: &State, r: &ProcessRow) -> String {
+    format::pct(r.cpu_pct.map(|v| v * cpu_factor(st)))
 }
 
 fn sort_value(st: &State, r: &ProcessRow, c: Column) -> SortValue {
@@ -336,6 +433,7 @@ fn sort_value(st: &State, r: &ProcessRow, c: Column) -> SortValue {
 
 /// 並びを必要なときだけ作り直す(CSV の保存も、書く前に呼んで今の Snapshot に合わせる)
 pub(crate) fn refresh(st: &mut State) {
+    st.procs.follow_config(&st.cfg);
     let key = ListKey {
         seq: st.snap.seq,
         filter: st.procs.filter.clone(),
@@ -343,6 +441,7 @@ pub(crate) fn refresh(st: &mut State) {
         col: st.cfg.columns.sort_column(),
         desc: st.cfg.columns.sort.descending,
         tree: st.cfg.view == View::Tree,
+        cpu_factor: cpu_factor(st),
         generation: st.procs.generation,
     };
     if st.procs.key.as_ref() == Some(&key) {
@@ -357,10 +456,10 @@ pub(crate) fn refresh(st: &mut State) {
     let snap = st.snap.clone();
     let rows = &snap.rows;
     let me = st.env.user.clone();
-    let (scope, col, desc) = (key.scope, key.col, key.desc);
+    let (scope, col, desc, k) = (key.scope, key.col, key.desc, key.cpu_factor);
     let st_ro: &State = st;
     let q = &st_ro.procs.query.1;
-    let m = |r: &ProcessRow| filter::in_scope(r, scope, me.as_deref()) && q.matches(r);
+    let m = |r: &ProcessRow| filter::in_scope(r, scope, me.as_deref()) && q.matches_scaled(r, k);
     // System Idle Process(PID 0)は、どの列・どちら向きでも一番下(CPU の降順で上に居座るため)
     let cmp = |a: &ProcessRow, b: &ProcessRow| {
         (a.id.pid == 0).cmp(&(b.id.pid == 0)).then_with(|| {
@@ -369,7 +468,10 @@ pub(crate) fn refresh(st: &mut State) {
     };
     let (forest, visible) = if key.tree {
         let f = tree::build(rows);
-        let v = tree::flatten_tree(rows, &f, &st_ro.procs.collapsed, &m, &cmp);
+        // 自分で畳んだ物は v0.3.0 と同じにいつも見る。「全部畳む」で畳んだ物は、絞り込みの間は見ない
+        // (全部の根が畳まれていると、一致した子が 1 行も出ないため)
+        let folded = st_ro.procs.folded_set(key.filter.trim().is_empty());
+        let v = tree::flatten_tree(rows, &f, &folded, &m, &cmp);
         (f, v)
     } else {
         (Forest::default(), tree::flatten_list(rows, &m, &cmp))
@@ -840,13 +942,13 @@ fn header_cell(
     c: Column,
     sort: Option<bool>,
     total: Option<(String, f32)>,
-    heat: bool,
-    spark: Option<&Ring<f32>>,
+    heat: Option<(f32, f32)>,
+    spark: Option<(&Ring<f32>, usize)>,
 ) -> bool {
     let rect = ui.max_rect();
     let resp = ui.interact(rect, ui.scope_id().with(("hdr", c.key())), Sense::click());
-    if heat && let Some((_, f)) = &total {
-        widgets::paint_heat(ui, rect, pal, *f);
+    if let (Some(range), Some((_, f))) = (heat, &total) {
+        paint_heat(ui, rect, pal, range, *f);
     }
     if resp.hovered() {
         ui.painter().rect_filled(rect, 0.0, widgets::tint(ui.visuals().strong_text_color(), 14));
@@ -858,12 +960,12 @@ fn header_cell(
     if let Some((t, _)) = &total {
         p.text(egui::pos2(x, rect.top() + 3.0), anchor_t, t, FontId::proportional(size::BODY + 2.0), ui.visuals().strong_text_color());
     }
-    if let Some(ring) = spark {
+    if let Some((ring, points)) = spark {
         // 隣の CPU の列の大きな数字と同じ高さの帯に、全体の CPU(行と同じ目盛り)
         let band = Rect::from_x_y_ranges(rect.left() + pad..=rect.right() - pad, rect.top() + 4.0..=rect.top() + 19.0);
         let latest = ring.last().copied().unwrap_or(0.0);
         let color = spark_color(pal, latest);
-        paint_spark(p, band, ring.iter().copied(), color, widgets::tint(color, 40));
+        paint_spark(p, band, ring.iter().copied(), points, spark_y, color, widgets::tint(color, 40), 1.25);
     }
     let title_color = if sort.is_some() { pal.accent } else { pal.weak };
     let bottom = rect.bottom() - 4.0;
@@ -916,6 +1018,7 @@ pub fn state_color(pal: &Palette, s: ProcState) -> Color32 {
 }
 
 pub fn ui(st: &mut State, ui: &mut Ui) {
+    st.procs.follow_config(&st.cfg);
     toolbar(st, ui);
     let pal = theme::palette(ui);
     if st.diag.spi_fail_in_row >= 4 {
@@ -987,7 +1090,7 @@ fn jump_if_asked(st: &mut State) {
     let mut cur = st.snap.find(id).and_then(|r| r.parent);
     let mut guard = 0;
     while let Some(p) = cur {
-        st.procs.collapsed.remove(&p);
+        st.procs.set_folded(p, false);
         cur = st.snap.find(p).and_then(|r| r.parent);
         guard += 1;
         if guard > 256 {
@@ -1010,6 +1113,7 @@ fn table(st: &State, ui: &mut Ui, pal: &Palette, scroll_row: Option<usize>) -> E
     let spacing_x = ui.spacing().item_spacing.x;
     let row_h = st.cfg.density.row_h();
     let heat_on = st.cfg.heat_map;
+    let heat_range = heat_on.then(|| (st.cfg.heat_start.frac(), st.cfg.heat_full.frac()));
     let mem_total = snap.perf.mem.as_ref().map(|m| m.total);
     let totals = &st.procs.totals;
     let mut tb = TableBuilder::new(ui)
@@ -1044,8 +1148,8 @@ fn table(st: &State, ui: &mut Ui, pal: &Palette, scroll_row: Option<usize>) -> E
                     );
                 }
                 let sort = (*c == sort_col).then_some(desc);
-                let spark = (*c == Column::CpuHistory).then_some(&st.procs.cpu_total_hist);
-                if header_cell(ui, pal, column_title(st, *c), *c, sort, totals.of_column(*c), heat_on, spark) {
+                let spark = (*c == Column::CpuHistory).then_some((&st.procs.cpu_total_hist, st.procs.points));
+                if header_cell(ui, pal, column_title(st, *c), *c, sort, totals.of_column(*c), heat_range, spark) {
                     ev.sort = Some(*c);
                 }
             });
@@ -1099,8 +1203,10 @@ fn table(st: &State, ui: &mut Ui, pal: &Palette, scroll_row: Option<usize>) -> E
                             layer.rect_filled(bar, 0.0, pal.accent);
                         }
                     }
-                    if heat_row && let Some(f) = heat_frac(mem_total, r, *c) {
-                        widgets::paint_heat(ui, row_rect, pal, f);
+                    if heat_row
+                        && let (Some(range), Some(f)) = (heat_range, heat_frac(mem_total, r, *c))
+                    {
+                        paint_heat(ui, row_rect, pal, range, f);
                     }
                     let text_color = if v.dimmed { pal.weak } else { ui.visuals().text_color() };
                     match c {
@@ -1184,9 +1290,8 @@ fn handle(st: &mut State, ui: &Ui, ev: Events) {
         st.save_config();
     }
     if let Some(id) = ev.toggle {
-        if !st.procs.collapsed.remove(&id) {
-            st.procs.collapsed.insert(id);
-        }
+        let folded = st.procs.is_folded(id);
+        st.procs.set_folded(id, !folded);
         st.procs.invalidate();
     }
     if let Some((id, m)) = ev.click {
@@ -1198,8 +1303,7 @@ fn handle(st: &mut State, ui: &Ui, ev: Events) {
         st.procs.select_only(id);
     }
     if let Some(id) = ev.double {
-        st.procs.select_only(id);
-        st.procs.detail.collapsed = false;
+        double_click(st, id);
     }
     for p in ev.icons {
         st.icons.insert(p.clone(), IconSlot::Pending);
@@ -1211,6 +1315,22 @@ fn handle(st: &mut State, ui: &Ui, ev: Events) {
     }
     for c in ev.cmds {
         run_cmd(st, ui, c);
+    }
+}
+
+/// 行のダブルクリック(設定の「行のダブルクリック」)。どれでも行は選ぶ。
+/// 詳細: 詳細パネルを開く。ファイルの場所: メニューと同じ条件(触れない・パスが無いなら何もしない)で同じ Job
+fn double_click(st: &mut State, id: ProcId) {
+    st.procs.select_only(id);
+    match st.cfg.double_click {
+        DoubleClick::Details => st.procs.detail.collapsed = false,
+        DoubleClick::OpenLocation => {
+            let path = st.snap.find(id).filter(|r| touch_refusal(r).is_none()).and_then(|r| r.path()).map(str::to_string);
+            if let Some(path) = path {
+                st.job(Job::OpenLocation { path });
+            }
+        }
+        DoubleClick::Nothing => {}
     }
 }
 
@@ -1308,11 +1428,11 @@ fn keyboard(st: &mut State, ui: &mut Ui) {
         let v = st.procs.visible[c].clone();
         let id = st.snap.rows[v.index].id;
         if pressed(ui, Key::ArrowLeft) && v.has_children && v.expanded {
-            st.procs.collapsed.insert(id);
+            st.procs.set_folded(id, true);
             st.procs.invalidate();
         }
         if pressed(ui, Key::ArrowRight) && v.has_children && !v.expanded {
-            st.procs.collapsed.remove(&id);
+            st.procs.set_folded(id, false);
             st.procs.invalidate();
         }
     }

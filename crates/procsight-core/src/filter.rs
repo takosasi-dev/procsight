@@ -214,6 +214,11 @@ impl Query {
 
     /// 値が取れない行(None)は、どの比較にも一致しない
     pub fn matches(&self, row: &ProcessRow) -> bool {
+        self.matches_scaled(row, 1.0)
+    }
+
+    /// `cpu>N` を、行の CPU に cpu_factor を掛けた値(表に出ている数字。設定の「CPU の数え方」)と比べる
+    pub fn matches_scaled(&self, row: &ProcessRow, cpu_factor: f32) -> bool {
         self.terms.iter().all(|t| match t {
             Term::Text(q) => {
                 (q.chars().all(|c| c.is_ascii_digit()) && q.parse::<u32>() == Ok(row.id.pid))
@@ -222,7 +227,7 @@ impl Query {
             }
             Term::Num(m, cmp, x) => {
                 let v = match m {
-                    Metric::Cpu => row.cpu_pct.map(f64::from),
+                    Metric::Cpu => row.cpu_pct.map(|v| f64::from(v * cpu_factor)),
                     Metric::Mem => row.mem.map(|v| v as f64),
                     Metric::Gpu => row.gpu_pct.map(f64::from),
                     Metric::Io => match (row.io_read_bps, row.io_write_bps) {
@@ -370,6 +375,19 @@ mod tests {
         // 今の呼び出し(範囲と一緒)
         assert!(matches(&r[0], "testee cpu>5", Scope::WithWindow, None));
         assert!(!matches(&r[2], "cpu>5", Scope::WithWindow, None));
+    }
+
+    /// CPU の数え方が「コア 1 つで 100%」のときは、表の数字(×論理 CPU の数)と比べる。CPU のほかは掛けない
+    #[test]
+    fn cpu_compare_uses_factor() {
+        let mut r = rows();
+        r[0].gpu_pct = Some(12.0);
+        let q = Query::parse("cpu>50");
+        assert!(!q.matches(&r[0]) && !q.matches_scaled(&r[0], 1.0));
+        assert!(q.matches_scaled(&r[0], 8.0), "10% × 8 = 80%");
+        assert!(Query::parse("cpu<=80").matches_scaled(&r[0], 8.0) && !Query::parse("cpu<80").matches_scaled(&r[0], 8.0));
+        assert!(!Query::parse("gpu>50").matches_scaled(&r[0], 8.0), "GPU は掛けない");
+        assert!(!Query::parse("cpu>=0").matches_scaled(&r[1], 8.0), "値の無い行は掛けても比べない");
     }
 
     #[test]

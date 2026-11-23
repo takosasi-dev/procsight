@@ -8,7 +8,7 @@ use crate::tray::{Tray, TrayEvent};
 use crate::{files, fonts, log};
 use eframe::egui;
 use egui::ViewportCommand;
-use procsight_core::config::CloseAction;
+use procsight_core::config::{CloseAction, StartMode};
 use procsight_core::taskmgr::{self, LaunchArgs};
 use procsight_win::jobs::Job;
 use procsight_win::single_instance::{self, Acquire, Instance};
@@ -46,7 +46,7 @@ pub struct Shell {
 }
 
 impl Shell {
-    fn new(cc: &eframe::CreationContext<'_>, mut st: State, instance: Instance, after_restart: bool) -> Shell {
+    fn new(cc: &eframe::CreationContext<'_>, mut st: State, instance: Instance, after_restart: bool, may_hide: bool) -> Shell {
         st.font = fonts::install(&cc.egui_ctx, &st.cfg.fonts);
         match &st.font {
             Some(f) => log::info("font", &format!("file={} index={}", log::q(log::file_name(&f.path)), f.index)),
@@ -69,14 +69,18 @@ impl Shell {
         }
         let tray = if st.cfg.tray_enabled { Tray::new(&cc.egui_ctx) } else { None };
         // 常に手前(既定オフなら命令は無い)。最初の logic() で送る
-        let startup_cmds = window_commands(WindowChange::Startup { always_on_top: st.cfg.always_on_top }, &facts_of(&st.cfg.window, 1.0, None));
+        let mut startup_cmds = window_commands(WindowChange::Startup { always_on_top: st.cfg.always_on_top }, &facts_of(&st.cfg.window, 1.0, None));
+        // 起動したときの窓がトレイなら、「トレイに残す」で閉じたときと同じに隠す(ミニは State が最初の ui で入る)
+        let start = start_commands(st.cfg.effective_start_mode(), tray.is_some() && may_hide);
+        let hidden = start.contains(&ViewportCommand::Visible(false));
+        startup_cmds.extend(start);
         Shell {
             backend: Some(backend),
             st,
             _instance: instance,
             activate: rx,
             tray,
-            hidden: false,
+            hidden,
             minimized: false,
             allow_close: false,
             config_dir: files::config_dir(),
@@ -210,11 +214,13 @@ impl eframe::App for Shell {
         let snap = b.snapshot();
         if snap.seq != self.last_seq {
             self.last_seq = snap.seq;
-            if let Some(t) = self.tray.as_mut() {
-                t.set_cpu(snap.perf.cpu_total);
-            }
             self.st.set_snapshot(snap);
             self.st.set_diagnostics(b.diagnostics());
+        }
+        // 毎回呼ぶ(棒と値が同じなら何もしない)。設定の tray_value を変えたときも、一時停止中でもすぐ描き直す
+        if let Some(t) = self.tray.as_mut() {
+            let p = &self.st.snap.perf;
+            t.set(self.st.cfg.tray_value, p.cpu_total, p.mem.as_ref().and_then(|m| m.used_pct()));
         }
         if self.activate.try_recv().is_ok() {
             self.show_window(ctx);
@@ -322,6 +328,12 @@ fn facts_of(w: &procsight_core::config::WindowPlacement, zoom: f32, mini: Option
     WindowFacts { pos, size: egui::vec2(w.width as f32 / z, w.height as f32 / z), maximized: w.maximized, zoom, mini }
 }
 
+/// 起動したときの窓の命令。Tray なら窓を出さずにトレイにしまう(トレイのアイコンが作れなかったら出す。開き直す道が無くなるため)。
+/// Normal は命令なし(v0.3.0 と同じ)、Mini は State が最初の ui で set_mini(true) する
+pub fn start_commands(mode: StartMode, has_tray: bool) -> Vec<ViewportCommand> {
+    if mode == StartMode::Tray && has_tray { vec![ViewportCommand::Visible(false)] } else { Vec::new() }
+}
+
 /// 窓の位置として使ってよい値か。最小化中の -32000 と、どの画面にもありそうにない値を捨てる(§9.3)。
 /// ponytail: 画面の大きさは見ていない。外したモニターの位置は残る(報告済み)
 pub fn plausible_position(x: f32, y: f32) -> bool {
@@ -425,6 +437,9 @@ pub fn run() -> ExitCode {
             st.suspended_from_last_run = Some(last);
         }
     }
+    // トレイにしまって起動するのは普通の起動だけ。Ctrl+Shift+Esc と管理者での再起動では窓を出す
+    // (再起動は自動か手動かを引数で区別できないので、見えていた窓が消えないほうに倒す)
+    let may_hide = matches!(launch, LaunchArgs::Normal | LaunchArgs::Unknown(_));
     let mut w = st.cfg.window.clone();
     if !plausible_position(w.x as f32, w.y as f32) {
         let d = procsight_core::config::WindowPlacement::default();
@@ -444,7 +459,7 @@ pub fn run() -> ExitCode {
         clipboard_shortcuts: false,
         ..Default::default()
     };
-    let result = eframe::run_native("ProcSight", options, Box::new(move |cc| Ok(Box::new(Shell::new(cc, st, instance, after_restart)))));
+    let result = eframe::run_native("ProcSight", options, Box::new(move |cc| Ok(Box::new(Shell::new(cc, st, instance, after_restart, may_hide)))));
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => {
@@ -476,6 +491,18 @@ mod shell_tests {
         let mut empty = vec![key(egui::Key::V, true)];
         clipboard_keys(&mut empty, || None);
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn start_tray_hides_the_window() {
+        assert_eq!(start_commands(StartMode::Tray, true), vec![ViewportCommand::Visible(false)]);
+    }
+
+    #[test]
+    fn start_normal_mini_or_no_tray_send_nothing() {
+        assert!(start_commands(StartMode::Normal, true).is_empty(), "既定は v0.3.0 と同じ");
+        assert!(start_commands(StartMode::Mini, true).is_empty(), "ミニは State が入る");
+        assert!(start_commands(StartMode::Tray, false).is_empty(), "トレイが作れなければ窓を出す");
     }
 
     #[test]

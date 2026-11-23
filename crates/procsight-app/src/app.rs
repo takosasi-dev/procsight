@@ -9,7 +9,7 @@ use crate::fonts::LoadedFont;
 use crate::theme::{self, Palette};
 use crate::{details, dialogs, locks, perf, procs, services_view, settings, startup_view};
 use egui::{Align, Color32, Key, Layout, Modifiers, RichText, Ui};
-use procsight_core::config::{Config, INTERVALS_MS};
+use procsight_core::config::{Config, INTERVALS_MS, StartMode, StartTab};
 use procsight_core::format;
 use procsight_core::{ProcId, ProcState, Snapshot};
 use procsight_win::jobs::{Job, JobResult, OpError, ReplaceInfo, Signature, Target};
@@ -34,6 +34,33 @@ impl Tab {
             Tab::Startup => "スタートアップ",
             Tab::Services => "サービス",
         }
+    }
+
+    /// 設定の StartTab にあたるタブ(Last は None)
+    pub fn of_start(t: StartTab) -> Option<Tab> {
+        match t {
+            StartTab::Processes => Some(Tab::Processes),
+            StartTab::Performance => Some(Tab::Performance),
+            StartTab::Startup => Some(Tab::Startup),
+            StartTab::Services => Some(Tab::Services),
+            StartTab::Last => None,
+        }
+    }
+
+    /// 設定に書く名前(`last_tab`)
+    pub fn start_tab(self) -> StartTab {
+        match self {
+            Tab::Processes => StartTab::Processes,
+            Tab::Performance => StartTab::Performance,
+            Tab::Startup => StartTab::Startup,
+            Tab::Services => StartTab::Services,
+        }
+    }
+
+    /// 起動時に開くタブ: `start_tab`(Last なら `last_tab`)
+    pub fn at_start(cfg: &Config) -> Tab {
+        let t = if cfg.start_tab == StartTab::Last { cfg.last_tab } else { cfg.start_tab };
+        Tab::of_start(t).unwrap_or(Tab::Processes)
     }
 }
 
@@ -158,7 +185,7 @@ pub struct State {
     pub now: f64,
     pub late_dismissed: bool,
     /// 適用済みのテーマと文字の大きさ
-    applied_look: Option<(procsight_core::config::Theme, f32)>,
+    applied_look: Option<(procsight_core::config::Theme, f32, procsight_core::config::Accent)>,
     /// 終了の手順の途中(D7 の「再開してから終了」で結果を待っている)
     pub exit_after_resume: bool,
     /// スレッドの一覧(Job::Threads の結果。D-20)。選んだプロセスの分だけ持つ
@@ -169,24 +196,28 @@ pub struct State {
     pub replace_saved: Option<String>,
     /// コマンド パレットとショートカットの一覧(v0.2.0)
     pub palette: crate::palette::PaletteView,
-    /// ミニ表示の中(v0.3.0。保存しない。起動はいつも普通の表示)
+    /// ミニ表示の中(v0.3.0。保存しない。起動時は設定の start_mode で決まる)
     pub mini: bool,
     /// ゲーム中に更新を遅くする判定(v0.3.0)
     pub slow: procsight_core::rules::SlowDown,
     /// Backend に渡している更新間隔(遅くしている間は cfg.interval_ms より長い)
     pub effective_interval_ms: u64,
+    /// 起動したときの窓がミニ表示(v0.4.0)。文字の大きさが効いてから(look の後で)1 回だけ入る
+    start_mini: bool,
 }
 
 impl State {
     pub fn new(env: EnvInfo, cfg: Config) -> State {
         let effective_interval_ms = cfg.interval_ms;
+        let tab = Tab::at_start(&cfg);
+        let start_mini = cfg.effective_start_mode() == StartMode::Mini;
         let mut st = State {
             procs: procs::ProcsView::new(&cfg),
             env,
             cfg,
             snap: Arc::new(Snapshot::default()),
             diag: Diagnostics::default(),
-            tab: Tab::Processes,
+            tab,
             bands: Vec::new(),
             paused: false,
             perf: perf::PerfView::default(),
@@ -218,6 +249,7 @@ impl State {
             mini: false,
             slow: Default::default(),
             effective_interval_ms,
+            start_mini,
         };
         st.effective_interval_ms = st.cfg.interval_ms;
         st
@@ -341,6 +373,9 @@ impl State {
             return;
         }
         self.snap = snap;
+        // グラフの長さは、どのタブを描いていなくても(トレイにしまっている間も)設定に合わせて溜める
+        self.perf.set_points(self.cfg.graph_points);
+        self.procs.follow_config(&self.cfg);
         self.perf.push(&self.snap);
         self.procs.on_snapshot(&self.snap);
         self.update_slow_down();
@@ -671,10 +706,11 @@ impl State {
     pub fn ui(&mut self, ui: &mut Ui) {
         let t0 = std::time::Instant::now();
         self.now = ui.input(|i| i.time);
-        let look = (self.cfg.theme, self.cfg.font_scale);
+        procsight_core::format::set_speed_unit(self.cfg.speed_unit);
+        let look = (self.cfg.theme, self.cfg.font_scale, self.cfg.accent);
         if self.applied_look != Some(look) {
             let first = self.applied_look.is_none();
-            theme::apply(ui.ctx(), look.0, look.1);
+            theme::apply(ui.ctx(), look.0, look.1, look.2);
             self.applied_look = Some(look);
             // 文字の大きさは次のフレームから効く。最初のフレームで描くと、詳細パネルや浮いた窓の大きさが
             // 拡大の前の値で決まってしまう(160% で詳細パネルが窓の半分を取る)ので、最初の 1 回だけ描かずに描き直す
@@ -682,6 +718,16 @@ impl State {
                 ui.ctx().request_repaint();
                 return;
             }
+        }
+        // 起動したときの窓がミニ表示なら、ここで 1 回だけ入る(文字の大きさが効いた後なので、出るときの大きさがずれない)
+        if std::mem::take(&mut self.start_mini) {
+            self.set_mini(true);
+        }
+        // 今のタブを「前回のタブ」として覚える。変わったときだけ保存する(タブはパレット・ミニなど方々から変わる)
+        let shown = self.tab.start_tab();
+        if self.cfg.last_tab != shown {
+            self.cfg.last_tab = shown;
+            self.save_config();
         }
         // 5 秒たった成功の帯を消す
         let now = self.now;

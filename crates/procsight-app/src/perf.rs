@@ -1,5 +1,5 @@
 //! S2 パフォーマンス(画面設計書 §5): 左にページの並び(名前・今の値・小さなグラフ)、右に見出し・大きな値・自前で描くグラフ・数字の格子・上位のプロセス。
-//! 履歴は Snapshot ごとに直近 60 回分だけメモリに持つ(非スコープ: 保存)。更新間隔を変えたら空から始める。上位のプロセスも Snapshot ごとに 1 回だけ並べる。
+//! 履歴は Snapshot ごとに直近 N 回分(設定のグラフの長さ)だけメモリに持つ(非スコープ: 保存)。更新間隔を変えたら空から始める。上位のプロセスも Snapshot ごとに 1 回だけ並べる。
 //! 取れないページは並びに残し、右に「この PC では取得できません」を出す(E-11)。
 
 use crate::app::{State, Tab};
@@ -7,6 +7,7 @@ use crate::theme::{self, Palette, size, space};
 use crate::widgets;
 use eframe::egui;
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
+use procsight_core::config::SpeedUnit;
 use procsight_core::format;
 use procsight_core::ring::{GRAPH_POINTS, Ring};
 use procsight_core::{PerfSample, ProcId, ProcessRow, Snapshot};
@@ -96,20 +97,45 @@ pub struct PerfView {
 }
 
 impl PerfView {
-    /// 更新間隔が変わったとき: グラフは空から。選んでいるページ・切り替え・最後の値と上位のプロセスは残す
+    /// グラフの点の数(全部の輪の長さ。`cpu` の輪を正とする)
+    pub fn points(&self) -> usize {
+        self.cpu.capacity()
+    }
+
+    /// 全部の輪の長さを n に合わせる(減らすと古い方を捨てる)。描く前に毎回呼んでよい(変わらなければ何もしない)
+    pub fn set_points(&mut self, n: usize) {
+        let fit = |r: &mut Ring<f32>| {
+            if r.capacity() != n {
+                r.set_capacity(n);
+            }
+        };
+        fit(&mut self.cpu);
+        fit(&mut self.mem);
+        self.cores.iter_mut().for_each(fit);
+        for s in self.disks.values_mut().chain(self.nets.values_mut()).chain(self.gpus.values_mut()) {
+            fit(&mut s.a);
+            fit(&mut s.b);
+            fit(&mut s.c);
+        }
+    }
+
+    /// 更新間隔が変わったとき: グラフは空から。選んでいるページ・切り替え・最後の値と上位のプロセス・点の数は残す
     pub fn clear(&mut self) {
+        let points = self.points();
         let page = std::mem::take(&mut self.page);
         let per_core = self.per_core;
         let last = std::mem::take(&mut self.last);
         let tops = std::mem::take(&mut self.tops);
         *self = PerfView { page, per_core, last, tops, ..Default::default() };
+        self.set_points(points);
     }
 
     pub fn push(&mut self, s: &Snapshot) {
         let p = &s.perf;
+        let points = self.points();
         self.cpu.push(p.cpu_total.unwrap_or(0.0));
         if self.cores.len() != p.cpu_per_core.len() {
-            self.cores = (0..p.cpu_per_core.len()).map(|_| Ring::default()).collect();
+            self.cores = (0..p.cpu_per_core.len()).map(|_| Ring::new(points)).collect();
         }
         for (r, v) in self.cores.iter_mut().zip(&p.cpu_per_core) {
             r.push(*v);
@@ -132,6 +158,8 @@ impl PerfView {
             let e = self.gpus.entry(g.luid.clone()).or_default();
             e.a.push(g.util_pct);
         }
+        // 新しく出てきたディスク・ネット・GPU の輪(既定の長さで作られる)を今の長さに
+        self.set_points(points);
         self.last = p.clone();
         if !s.rows_stale {
             self.tops = Tops::from_rows(&s.rows);
@@ -141,13 +169,14 @@ impl PerfView {
 
 // ---------------------------------------------------------------- 小さな絵
 
-/// 線と塗りを rect に描く(左が古く、右が今。60 回に満たない間は右に寄せる)
+/// 線と塗りを rect に描く(左が古く、右が今。横は輪の長さ(点の数)で割り、満たない間は右に寄せる)
 fn paint_line(painter: &egui::Painter, rect: Rect, vals: &Ring<f32>, max: f32, color: Color32, fill_alpha: u8, width: f32) {
+    let points = vals.capacity().max(2);
     if vals.len() < 2 || max <= 0.0 {
         return;
     }
-    let n = GRAPH_POINTS as f32 - 1.0;
-    let start = GRAPH_POINTS - vals.len().min(GRAPH_POINTS);
+    let n = points as f32 - 1.0;
+    let start = points - vals.len().min(points);
     let pts: Vec<Pos2> = vals
         .iter()
         .enumerate()
@@ -173,11 +202,11 @@ fn paint_line(painter: &egui::Painter, rect: Rect, vals: &Ring<f32>, max: f32, c
     painter.add(egui::Shape::line(pts, Stroke::new(width, color)));
 }
 
-/// 小さな線のグラフ(枠つき)。`max` を上端にする(詳細パネルも使う)
-pub fn sparkline(ui: &mut Ui, values: impl Iterator<Item = f32>, max: f32, size: Vec2, color: Color32) {
+/// 小さな線のグラフ(枠つき)。`max` を上端、横は points 回分で、足りない分は右に寄せる。値が points より多ければ新しい方の points 個だけ描く
+pub fn sparkline_in(ui: &mut Ui, values: impl Iterator<Item = f32>, points: usize, max: f32, size: Vec2, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let pal = theme::palette(ui);
-    let mut ring = Ring::default();
+    let mut ring = Ring::new(points);
     for v in values {
         ring.push(v);
     }
@@ -213,30 +242,44 @@ enum Unit {
 
 const UNIT_NAMES_BYTES: [&str; 4] = ["B", "KB", "MB", "GB"];
 const UNIT_NAMES_SPEED: [&str; 4] = ["B/s", "KB/s", "MB/s", "GB/s"];
+const UNIT_NAMES_BITS: [&str; 4] = ["bps", "Kbps", "Mbps", "Gbps"];
 
-/// max の大きさから 1024 進の段を選ぶ(0〜3)
-fn unit_step(max: f64) -> usize {
+/// 速さの単位ごとの (進数, B/s に掛ける数, 名前)。ビットは ×8 の 1000 進(format::speed_in と同じ)
+fn speed_scale(u: SpeedUnit) -> (f64, f64, [&'static str; 4]) {
+    match u {
+        SpeedUnit::Bytes => (1024.0, 1.0, UNIT_NAMES_SPEED),
+        SpeedUnit::Bits => (1000.0, 8.0, UNIT_NAMES_BITS),
+    }
+}
+
+/// max の大きさから base 進の段を選ぶ(0〜3)
+fn unit_step(max: f64, base: f64) -> usize {
     let mut k = 0;
     let mut m = max;
-    while m >= 1024.0 && k < 3 {
-        m /= 1024.0;
+    while m >= base && k < 3 {
+        m /= base;
         k += 1;
     }
     k
 }
 
 impl Unit {
-    /// 縦軸の目盛りの文字。0 は「0」だけ、ほかは max と同じ単位で
+    /// 縦軸の目盛りの文字。0 は「0」だけ、ほかは max と同じ単位で(速さは画面のスレッドの単位)
     fn axis(self, v: f64, max: f64) -> String {
+        self.axis_in(v, max, format::speed_unit())
+    }
+
+    fn axis_in(self, v: f64, max: f64, speed: SpeedUnit) -> String {
         if v <= 0.0 {
             return "0".into();
         }
         match self {
             Unit::Pct => format!("{v:.0}%"),
             Unit::Bytes | Unit::Speed => {
-                let k = unit_step(max);
-                let x = v / 1024f64.powi(k as i32);
-                let name = if matches!(self, Unit::Bytes) { UNIT_NAMES_BYTES[k] } else { UNIT_NAMES_SPEED[k] };
+                let (base, mul, names) = if matches!(self, Unit::Bytes) { (1024.0, 1.0, UNIT_NAMES_BYTES) } else { speed_scale(speed) };
+                let k = unit_step(max * mul, base);
+                let x = v * mul / base.powi(k as i32);
+                let name = names[k];
                 if (x - x.round()).abs() < 0.005 {
                     format!("{x:.0} {name}")
                 } else if (x * 10.0 - (x * 10.0).round()).abs() < 0.05 {
@@ -258,17 +301,18 @@ impl Unit {
     }
 }
 
-/// 速さの縦軸の上端: 見えている最大を、同じ単位で 1・2・4・6・8・10 の切りのよい数に上げる(最小 1 KB/s)
-fn nice_speed_max(raw: f64) -> f64 {
+/// 速さの縦軸の上端(B/s で返す): 見えている最大を、その単位で 1・2・4・6・8・10 の切りのよい数に上げる(最小 1 KB/s・1 Kbps)
+fn nice_speed_max(raw: f64, unit: SpeedUnit) -> f64 {
+    let (base, mul, _) = speed_scale(unit);
     // 線が上の縁に張り付かないよう 1 割の余白を足す
-    let raw = (raw * 1.1).max(1024.0);
-    let k = unit_step(raw);
-    let u = 1024f64.powi(k as i32);
+    let raw = (raw * mul * 1.1).max(base);
+    let k = unit_step(raw, base);
+    let u = base.powi(k as i32);
     let x = raw / u;
     let p = 10f64.powf(x.log10().floor());
     let m = [1.0, 2.0, 4.0, 6.0, 8.0, 10.0].into_iter().map(|c| c * p).find(|c| *c >= x - 1e-9).unwrap_or(10.0 * p);
     // 1000 台の切りのよい数が 1024 を超えたら、1 つ上の単位の 1 にする(「1.95 MB/s」のような半端な目盛りを避ける)
-    if m >= 1024.0 { 1024.0 * u } else { m * u }
+    (if m >= base { base * u } else { m * u }) / mul
 }
 
 // ---------------------------------------------------------------- 大きいグラフ
@@ -315,13 +359,15 @@ fn graph(ui: &mut Ui, pal: &Palette, height: f32, max: f64, unit: Unit, lines: &
     }
     // 指したところ: 縦の線と点、値の札
     if let Some(pos) = resp.hover_pos().filter(|p| plot.contains(*p)) {
-        let n = GRAPH_POINTS - 1;
+        // 横の点の数は線の輪の長さ(どの線も同じ長さ)
+        let points = lines.first().map_or(GRAPH_POINTS, |l| l.ring.capacity()).max(2);
+        let n = points - 1;
         let idx = (((pos.x - inner.left()) / inner.width()) * n as f32).round().clamp(0.0, n as f32) as usize;
         let x = inner.left() + idx as f32 / n as f32 * inner.width();
         clip.vline(x, plot.y_range(), Stroke::new(1.0, pal.weak));
         let mut rows = Vec::new();
         for l in lines {
-            let start = GRAPH_POINTS - l.ring.len().min(GRAPH_POINTS);
+            let start = points - l.ring.len().min(points);
             if idx >= start
                 && let Some(v) = l.ring.iter().nth(idx - start)
             {
@@ -357,12 +403,21 @@ fn graph_caption(ui: &mut Ui, pal: &Palette, text: &str, legend: &[(&str, Color3
     });
 }
 
+/// 長さ(ミリ秒)を「N 分」か「N 秒」に(分で割り切れるときだけ分)
+pub fn span_text(ms: u64) -> String {
+    let secs = ms / 1000;
+    if secs >= 60 && secs.is_multiple_of(60) { format!("{} 分", secs / 60) } else { format!("{secs} 秒") }
+}
+
+/// グラフの下の行の文字: 横軸が何回分か
+pub fn footer_text(points: usize, interval_ms: u64) -> String {
+    format!("{points} 回分(直近 {})", span_text(interval_ms * points as u64))
+}
+
 /// グラフの下の行: 横軸が何回分か
-fn graph_footer(ui: &mut Ui, pal: &Palette, interval_ms: u64) {
-    let secs = interval_ms * (GRAPH_POINTS as u64) / 1000;
-    let span = if secs >= 60 && secs.is_multiple_of(60) { format!("{} 分", secs / 60) } else { format!("{secs} 秒") };
+fn graph_footer(ui: &mut Ui, pal: &Palette, cx: &Ctx<'_>) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(format!("{GRAPH_POINTS} 回分(直近 {span})")).color(pal.weak).size(size::SMALL));
+        ui.label(RichText::new(footer_text(cx.points, cx.interval_ms)).color(pal.weak).size(size::SMALL));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(RichText::new("今").color(pal.weak).size(size::SMALL)));
     });
 }
@@ -451,6 +506,8 @@ struct TopSpec<'a> {
     unit: Unit,
     /// 横棒の上端(None なら一番上の行の値)
     full: Option<f64>,
+    /// 数字にだけ掛ける数(CPU の数え方。棒の割合と並びは掛ける前の値)
+    scale: f64,
 }
 
 /// 上位 5 個の小さな表。行を押すと、その行の識別子を返す
@@ -503,7 +560,7 @@ fn top_table(ui: &mut Ui, pal: &Palette, spec: &TopSpec<'_>) -> Option<ProcId> {
                 fill.set_width((track.width() * f).max(3.0));
                 ui.painter().rect_filled(fill, CornerRadius::same(3), pal.graph);
             }
-            ui.painter().text(egui::pos2(v.right(), v.center().y), Align2::RIGHT_CENTER, spec.unit.value(row.value), font.clone(), text);
+            ui.painter().text(egui::pos2(v.right(), v.center().y), Align2::RIGHT_CENTER, spec.unit.value(row.value * spec.scale), font.clone(), text);
         }
         if resp.clicked() {
             picked = Some(row.id);
@@ -637,12 +694,19 @@ struct Ctx<'a> {
     pal: Palette,
     graph_h: f32,
     interval_ms: u64,
+    /// グラフの点の数(cfg.graph_points)
+    points: usize,
+    /// 上位のプロセスの CPU に掛ける数(cfg.cpu_factor)
+    cpu_factor: f64,
     totals: &'a procsight_core::Totals,
     env: &'a procsight_win::EnvInfo,
 }
 
 pub fn ui(st: &mut State, ui: &mut Ui) {
     let pal = theme::palette(ui);
+    let points = st.cfg.graph_points;
+    st.perf.set_points(points);
+    let cpu_factor = f64::from(st.cfg.cpu_factor(st.snap.logical_cpus));
     egui::Panel::left("perf_side").resizable(false).exact_size(236.0).show(ui, |ui| {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| side(&mut st.perf, ui, &pal));
     });
@@ -652,7 +716,7 @@ pub fn ui(st: &mut State, ui: &mut Ui) {
     egui::CentralPanel::default_margins().show(ui, |ui| {
         // ScrollArea の中では高さに限りが無いので、グラフの高さは外で決める
         let graph_h = (ui.available_height() * 0.34).clamp(150.0, 300.0);
-        let cx = Ctx { pal, graph_h, interval_ms, totals: &snap.totals, env };
+        let cx = Ctx { pal, graph_h, interval_ms, points, cpu_factor, totals: &snap.totals, env };
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.set_width(ui.available_width());
             jump = page(ui, &cx, pv);
@@ -684,7 +748,7 @@ fn page(ui: &mut Ui, cx: &Ctx<'_>, pv: &mut PerfView) -> Option<ProcId> {
             ui.add_space(space::L);
             graph_caption(ui, pal, "使用中のメモリ", &[]);
             graph(ui, pal, cx.graph_h, m.total as f64, Unit::Bytes, &[Line { name: "使用中", ring: &pv.mem, color: pal.graph }]);
-            graph_footer(ui, pal, cx.interval_ms);
+            graph_footer(ui, pal, cx);
             ui.add_space(space::M);
             let mut items = vec![
                 ("使用中", format::bytes(m.in_use())),
@@ -696,7 +760,7 @@ fn page(ui: &mut Ui, cx: &Ctx<'_>, pv: &mut PerfView) -> Option<ProcId> {
                     items.push((k, format::bytes(v)));
                 }
             }
-            let spec = TopSpec { title: "メモリを使っているプロセス", col: "メモリ", rows: &pv.tops.mem, unit: Unit::Bytes, full: None };
+            let spec = TopSpec { title: "メモリを使っているプロセス", col: "メモリ", rows: &pv.tops.mem, unit: Unit::Bytes, full: None, scale: 1.0 };
             two_up(
                 ui,
                 |ui| {
@@ -717,14 +781,14 @@ fn page(ui: &mut Ui, cx: &Ctx<'_>, pv: &mut PerfView) -> Option<ProcId> {
                 return None;
             };
             hero(ui, pal, &format!("{:.0}%", d.active_pct), "アクティブな時間");
-            let rw_max = nice_speed_max(ring_max(&s.b).max(ring_max(&s.c)) as f64);
+            let rw_max = nice_speed_max(ring_max(&s.b).max(ring_max(&s.c)) as f64, format::speed_unit());
             let h = cx.graph_h * 0.8;
             two_up(
                 ui,
                 |ui| {
                     graph_caption(ui, pal, "アクティブな時間", &[]);
                     graph(ui, pal, h, 100.0, Unit::Pct, &[Line { name: "アクティブな時間", ring: &s.a, color: pal.graph }]);
-                    graph_footer(ui, pal, cx.interval_ms);
+                    graph_footer(ui, pal, cx);
                 },
                 |ui| {
                     graph_caption(ui, pal, "読み取り・書き込みの速さ", &[("読み取り", pal.graph), ("書き込み", pal.graph2)]);
@@ -732,7 +796,7 @@ fn page(ui: &mut Ui, cx: &Ctx<'_>, pv: &mut PerfView) -> Option<ProcId> {
                         Line { name: "読み取り", ring: &s.b, color: pal.graph },
                         Line { name: "書き込み", ring: &s.c, color: pal.graph2 },
                     ]);
-                    graph_footer(ui, pal, cx.interval_ms);
+                    graph_footer(ui, pal, cx);
                 },
             );
             ui.add_space(space::M);
@@ -743,7 +807,7 @@ fn page(ui: &mut Ui, cx: &Ctx<'_>, pv: &mut PerfView) -> Option<ProcId> {
                 ("読み取りの最大", format::speed(Some(ring_max(&s.b) as f64))),
                 ("書き込みの最大", format::speed(Some(ring_max(&s.c) as f64))),
             ];
-            let spec = TopSpec { title: "I/O の多いプロセス(読み取り+書き込み)", col: "I/O", rows: &pv.tops.io, unit: Unit::Speed, full: None };
+            let spec = TopSpec { title: "I/O の多いプロセス(読み取り+書き込み)", col: "I/O", rows: &pv.tops.io, unit: Unit::Speed, full: None, scale: 1.0 };
             two_up(
                 ui,
                 |ui| {
@@ -764,13 +828,13 @@ fn page(ui: &mut Ui, cx: &Ctx<'_>, pv: &mut PerfView) -> Option<ProcId> {
                 return None;
             };
             hero(ui, pal, &format::speed(Some(n.recv_bps)), &format!("受信  ・  送信 {}", format::speed(Some(n.send_bps))));
-            let max = nice_speed_max(ring_max(&s.a).max(ring_max(&s.b)) as f64);
+            let max = nice_speed_max(ring_max(&s.a).max(ring_max(&s.b)) as f64, format::speed_unit());
             graph_caption(ui, pal, "送信と受信の速さ", &[("受信", pal.graph), ("送信", pal.graph2)]);
             graph(ui, pal, cx.graph_h, max, Unit::Speed, &[
                 Line { name: "受信", ring: &s.b, color: pal.graph },
                 Line { name: "送信", ring: &s.a, color: pal.graph2 },
             ]);
-            graph_footer(ui, pal, cx.interval_ms);
+            graph_footer(ui, pal, cx);
             ui.add_space(space::M);
             let avg = |r: &Ring<f32>| if r.is_empty() { 0.0 } else { r.iter().map(|v| *v as f64).sum::<f64>() / r.len() as f64 };
             let items = [
@@ -782,7 +846,7 @@ fn page(ui: &mut Ui, cx: &Ctx<'_>, pv: &mut PerfView) -> Option<ProcId> {
                 ("送信の平均", format::speed(Some(avg(&s.a)))),
             ];
             // 受信が大きいと送信の線が底に張り付くので、送信だけの目盛りのグラフも並べる
-            let send_max = nice_speed_max(ring_max(&s.a) as f64);
+            let send_max = nice_speed_max(ring_max(&s.a) as f64, format::speed_unit());
             two_up(
                 ui,
                 |ui| {
@@ -811,7 +875,7 @@ fn page(ui: &mut Ui, cx: &Ctx<'_>, pv: &mut PerfView) -> Option<ProcId> {
             hero(ui, pal, &format!("{:.0}%", g.util_pct), "使用率");
             graph_caption(ui, pal, "使用率", &[]);
             graph(ui, pal, cx.graph_h, 100.0, Unit::Pct, &[Line { name: "使用率", ring: &s.a, color: pal.graph }]);
-            graph_footer(ui, pal, cx.interval_ms);
+            graph_footer(ui, pal, cx);
             ui.add_space(space::M);
             let items = [
                 ("使用率", format!("{:.0}%", g.util_pct)),
@@ -819,7 +883,7 @@ fn page(ui: &mut Ui, cx: &Ctx<'_>, pv: &mut PerfView) -> Option<ProcId> {
                 ("共有メモリ", format::opt_bytes(g.shared_bytes)),
                 ("使用率の最大", format!("{:.0}%", ring_max(&s.a))),
             ];
-            let spec = TopSpec { title: "GPU を使っているプロセス(全 GPU)", col: "GPU", rows: &pv.tops.gpu, unit: Unit::Pct, full: Some(100.0) };
+            let spec = TopSpec { title: "GPU を使っているプロセス(全 GPU)", col: "GPU", rows: &pv.tops.gpu, unit: Unit::Pct, full: Some(100.0), scale: 1.0 };
             two_up(
                 ui,
                 |ui| {
@@ -869,7 +933,7 @@ fn cpu_page(ui: &mut Ui, cx: &Ctx<'_>, pv: &mut PerfView, p: &PerfSample) -> Opt
     } else {
         graph(ui, pal, cx.graph_h, 100.0, Unit::Pct, &[Line { name: "CPU", ring: &pv.cpu, color: pal.graph }]);
     }
-    graph_footer(ui, pal, cx.interval_ms);
+    graph_footer(ui, pal, cx);
     ui.add_space(space::M);
     let usage = [
         ("使用率", format::pct(p.cpu_total)),
@@ -889,7 +953,7 @@ fn cpu_page(ui: &mut Ui, cx: &Ctx<'_>, pv: &mut PerfView, p: &PerfSample) -> Opt
             }
         }
     }
-    let spec = TopSpec { title: "CPU を使っているプロセス", col: "CPU", rows: &pv.tops.cpu, unit: Unit::Pct, full: Some(100.0) };
+    let spec = TopSpec { title: "CPU を使っているプロセス", col: "CPU", rows: &pv.tops.cpu, unit: Unit::Pct, full: Some(100.0), scale: cx.cpu_factor };
     two_up(
         ui,
         |ui| {
@@ -966,13 +1030,65 @@ mod tests {
 
     #[test]
     fn nice_speed_max_rounds_up_within_unit() {
-        assert_eq!(nice_speed_max(0.0), 1024.0);
-        assert_eq!(nice_speed_max(3.0 * 1024.0), 4.0 * 1024.0);
-        assert_eq!(nice_speed_max(4.0 * 1024.0), 6.0 * 1024.0, "上の縁に張り付かない");
-        assert_eq!(nice_speed_max(1.5 * 1024.0 * 1024.0), 2.0 * 1024.0 * 1024.0);
-        assert_eq!(nice_speed_max(70.0 * 1024.0), 80.0 * 1024.0);
-        assert_eq!(nice_speed_max(850.0 * 1024.0), 1000.0 * 1024.0);
-        assert_eq!(nice_speed_max(930.0 * 1024.0), 1024.0 * 1024.0, "1.95 MB/s にならない");
+        let m = |v| nice_speed_max(v, SpeedUnit::Bytes);
+        assert_eq!(m(0.0), 1024.0);
+        assert_eq!(m(3.0 * 1024.0), 4.0 * 1024.0);
+        assert_eq!(m(4.0 * 1024.0), 6.0 * 1024.0, "上の縁に張り付かない");
+        assert_eq!(m(1.5 * 1024.0 * 1024.0), 2.0 * 1024.0 * 1024.0);
+        assert_eq!(m(70.0 * 1024.0), 80.0 * 1024.0);
+        assert_eq!(m(850.0 * 1024.0), 1000.0 * 1024.0);
+        assert_eq!(m(930.0 * 1024.0), 1024.0 * 1024.0, "1.95 MB/s にならない");
+    }
+
+    /// ビット: 1000 進の切りのよい数を B/s(÷8)で返し、目盛りは bps・Kbps・Mbps・Gbps
+    #[test]
+    fn nice_speed_max_in_bits_is_round_in_1000s() {
+        let m = |v| nice_speed_max(v, SpeedUnit::Bits);
+        let top = |v: f64| Unit::Speed.axis_in(m(v), m(v), SpeedUnit::Bits);
+        assert_eq!(m(0.0), 125.0, "最小は 1 Kbps");
+        assert_eq!(top(0.0), "1 Kbps");
+        assert_eq!(m(125_000.0), 250_000.0, "1 Mbps は 1.1 倍で 2 Mbps に上がる");
+        assert_eq!(top(125_000.0), "2 Mbps");
+        assert_eq!(top(70_000.0 / 8.0), "80 Kbps");
+        assert_eq!(top(850e6 / 8.0), "1 Gbps", "1000 Mbps ではなく 1 Gbps");
+        assert_eq!(Unit::Speed.axis_in(62_500.0, 250_000.0, SpeedUnit::Bits), "0.5 Mbps");
+        assert_eq!(Unit::Speed.axis_in(60.0, 250.0, SpeedUnit::Bits), "0.48 Kbps");
+        assert_eq!(Unit::Speed.axis_in(0.0, 250.0, SpeedUnit::Bits), "0");
+        assert_eq!(Unit::Bytes.axis_in(8.0 * 1024f64.powi(3), 32.0 * 1024f64.powi(3), SpeedUnit::Bits), "8 GB", "量はビットにしない");
+    }
+
+    /// グラフの長さ: 輪を合わせ直しても新しい方が残り、間隔を変えて空にしても長さは残る
+    #[test]
+    fn set_points_resizes_every_ring_and_survives_clear() {
+        let mut pv = PerfView::default();
+        assert_eq!(pv.points(), GRAPH_POINTS, "既定は v0.3.0 と同じ 60");
+        pv.set_points(300);
+        for seq in 1..=200 {
+            pv.push(&crate::demo::snapshot(seq));
+        }
+        let all = |pv: &PerfView| {
+            let mut v = vec![pv.cpu.capacity(), pv.mem.capacity()];
+            v.extend(pv.cores.iter().map(Ring::capacity));
+            v.extend(pv.disks.values().chain(pv.nets.values()).chain(pv.gpus.values()).flat_map(|s| [s.a.capacity(), s.b.capacity(), s.c.capacity()]));
+            v
+        };
+        assert!(all(&pv).iter().all(|c| *c == 300), "後から出てきた輪も 300");
+        assert_eq!(pv.cpu.len(), 200);
+        let newest = *pv.cpu.last().unwrap();
+        pv.set_points(120);
+        assert!(all(&pv).iter().all(|c| *c == 120));
+        assert_eq!((pv.cpu.len(), *pv.cpu.last().unwrap()), (120, newest), "減らすと古い方を捨てる");
+        pv.clear();
+        assert_eq!(pv.points(), 120, "間隔を変えて空にしても長さは残る");
+        pv.push(&crate::demo::snapshot(1));
+        assert!(all(&pv).iter().all(|c| *c == 120));
+    }
+
+    #[test]
+    fn footer_counts_the_chosen_points() {
+        assert_eq!(footer_text(60, 1000), "60 回分(直近 1 分)");
+        assert_eq!(footer_text(300, 1000), "300 回分(直近 5 分)");
+        assert_eq!(footer_text(120, 2000), "120 回分(直近 4 分)");
     }
 
     #[test]

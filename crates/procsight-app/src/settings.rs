@@ -9,7 +9,9 @@ use crate::services_view::segmented;
 use crate::theme::{self, Palette, size, space};
 use crate::widgets;
 use egui::{Align2, CornerRadius, FontId, Rect, RichText, Sense, Ui, Vec2};
-use procsight_core::config::{CloseAction, Density, INTERVALS_MS, Theme, View};
+use procsight_core::config::{
+    Accent, CloseAction, CpuScale, Density, DoubleClick, GRAPH_POINTS_CHOICES, HeatFull, HeatStart, INTERVALS_MS, SpeedUnit, StartMode, StartTab, Theme, TrayValue, TreeStart, View,
+};
 use procsight_core::format;
 use procsight_core::rules::{self, MAX_TOUCH_FREE};
 use procsight_core::taskmgr::{self, ReplaceStatus};
@@ -25,25 +27,46 @@ pub const ALWAYS_ON_TOP_TEXT: &str = "ほかの窓の上に出したままにし
 
 pub const HEAT_MAP_TEXT: &str = "CPU やメモリの列の背景を、使っている量に合わせて塗ります";
 
+pub const CPU_SCALE_TEXT: &str = "プロセスごとの CPU の数え方です。「1 コアで 100%」では、論理プロセッサ 1 個を使い切ると 100% になります(8 個なら最大 800%)。変わるのはプロセスごとの数字(表・詳細・使っているプロセスの上位・ミニ表示の一番のプロセス)で、PC 全体の CPU の使用率とグラフは、いつも 0〜100% です。絞り込みの cpu>50 も表の数字と同じ数え方で比べます";
+
+pub const GRAPH_TEXT: &str = "グラフに持つ回数です。メモリの中だけに持ち、保存しません。長くすると、少しだけメモリを多く使います";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SPage {
     #[default]
     General,
     Look,
+    Table,
+    MiniTray,
     TouchFree,
     Diagnostics,
 }
 
 impl SPage {
-    const ALL: [SPage; 4] = [SPage::General, SPage::Look, SPage::TouchFree, SPage::Diagnostics];
+    pub const ALL: [SPage; 6] = [SPage::General, SPage::Look, SPage::Table, SPage::MiniTray, SPage::TouchFree, SPage::Diagnostics];
     fn label(self) -> &'static str {
         match self {
             SPage::General => "全般",
             SPage::Look => "見た目",
+            SPage::Table => "表とグラフ",
+            SPage::MiniTray => "ミニ表示とトレイ",
             SPage::TouchFree => "触れないプロセス",
             SPage::Diagnostics => "診断",
         }
     }
+}
+
+/// enum の選択(segmented)。変わったら true
+fn choose<T: PartialEq + Copy>(ui: &mut Ui, pal: &Palette, label: &str, value: &mut T, all: &[T], name: fn(T) -> &'static str) -> bool {
+    let before = *value;
+    ui.horizontal_wrapped(|ui| {
+        if !label.is_empty() {
+            ui.label(label);
+        }
+        let items: Vec<(T, String)> = all.iter().map(|&v| (v, name(v).to_string())).collect();
+        segmented(ui, pal, value, &items);
+    });
+    *value != before
 }
 
 #[derive(Default)]
@@ -188,6 +211,8 @@ pub fn window(st: &mut State, ui: &mut Ui) {
                         match st.settings.page {
                             SPage::General => general(st, ui),
                             SPage::Look => look(st, ui),
+                            SPage::Table => table(st, ui),
+                            SPage::MiniTray => mini_tray(st, ui),
                             SPage::TouchFree => touch_free(st, ui),
                             SPage::Diagnostics => diagnostics(st, ui),
                         }
@@ -239,6 +264,31 @@ fn general(st: &mut State, ui: &mut Ui) {
         st.actions.push(Action::TrayChanged);
     }
     head(ui, &pal, "起動");
+    let mut changed = choose(ui, &pal, "開くタブ", &mut st.cfg.start_tab, StartTab::ALL, StartTab::label);
+    let shown = st.cfg.effective_start_mode();
+    let mut clicked = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.label("起動したときの窓");
+        for &m in StartMode::ALL {
+            let enabled = m != StartMode::Tray || st.cfg.tray_enabled;
+            let r = ui.add_enabled(enabled, egui::RadioButton::new(shown == m, m.label()));
+            if r.clicked() {
+                clicked = Some(m);
+            }
+            if !enabled {
+                r.on_disabled_hover_text("トレイにアイコンを出すときだけ選べます");
+            }
+        }
+    });
+    // 押した物をそのまま入れる(トレイを切っている間に残っていた Tray も、「普通の表示」を押せば消える)
+    if let Some(m) = clicked.filter(|m| *m != st.cfg.start_mode) {
+        st.cfg.start_mode = m;
+        changed = true;
+    }
+    desc(ui, &pal, "Ctrl+Shift+Esc で開いたときと、管理者で再起動したときは、トレイにしまわずに窓を出します");
+    if changed {
+        st.save_config();
+    }
     if ui.checkbox(&mut st.cfg.elevate_on_start, "起動時に管理者へ切り替える").changed() {
         st.save_config();
     }
@@ -335,6 +385,10 @@ fn look(st: &mut State, ui: &mut Ui) {
         st.cfg.theme = t;
         st.save_config();
     }
+    head(ui, &pal, "強調の色");
+    if accent_picker(ui, &mut st.cfg.accent) {
+        st.save_config();
+    }
     head(ui, &pal, "文字");
     let mut pct = (st.cfg.font_scale * 100.0).round() as i32;
     ui.add(egui::Slider::new(&mut pct, 80..=160).step_by(10.0).suffix("%").text("文字の大きさ"));
@@ -369,6 +423,104 @@ fn look(st: &mut State, ui: &mut Ui) {
         st.save_config();
     }
     desc(ui, &pal, HEAT_MAP_TEXT);
+    ui.add_enabled_ui(st.cfg.heat_map, |ui| {
+        let mut changed = choose(ui, &pal, "塗り始める所", &mut st.cfg.heat_start, HeatStart::ALL, HeatStart::label);
+        changed |= choose(ui, &pal, "一番濃くする所", &mut st.cfg.heat_full, HeatFull::ALL, HeatFull::label);
+        if changed {
+            st.save_config();
+        }
+    });
+}
+
+/// 強調の色の丸(選んでいる物に輪)。変わったら true
+fn accent_picker(ui: &mut Ui, value: &mut Accent) -> bool {
+    let dark = ui.visuals().dark_mode;
+    let before = *value;
+    ui.horizontal_wrapped(|ui| {
+        for &a in Accent::ALL {
+            let color = theme::palette_for(dark, a).accent;
+            let (rect, resp) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+            if ui.is_rect_visible(rect) {
+                let p = ui.painter();
+                p.circle_filled(rect.center(), 9.0, color);
+                if *value == a {
+                    p.circle_stroke(rect.center(), 12.0, egui::Stroke::new(2.0, ui.visuals().strong_text_color()));
+                } else if resp.hovered() {
+                    p.circle_stroke(rect.center(), 12.0, egui::Stroke::new(1.0, ui.visuals().weak_text_color()));
+                }
+            }
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, *value == a, a.label()));
+            if resp.on_hover_text(a.label()).clicked() {
+                *value = a;
+            }
+        }
+    });
+    *value != before
+}
+
+/// 表とグラフ(v0.4.0): CPU の数え方・速さの単位・グラフの長さ・ダブルクリック・ツリーの最初の開き方
+fn table(st: &mut State, ui: &mut Ui) {
+    let pal = theme::palette(ui);
+    let mut changed = false;
+    head(ui, &pal, "CPU の数え方");
+    changed |= choose(ui, &pal, "", &mut st.cfg.cpu_scale, CpuScale::ALL, CpuScale::label);
+    desc(ui, &pal, CPU_SCALE_TEXT);
+    head(ui, &pal, "速さの単位");
+    changed |= choose(ui, &pal, "", &mut st.cfg.speed_unit, SpeedUnit::ALL, SpeedUnit::label);
+    desc(ui, &pal, "ディスクと通信の速さに使います。ビットは 1000 進です(1 Mbps = 1,000,000 ビット毎秒)");
+    head(ui, &pal, "グラフの長さ");
+    let mut n = st.cfg.graph_points;
+    ui.horizontal_wrapped(|ui| {
+        for v in GRAPH_POINTS_CHOICES {
+            let span = crate::perf::span_text(st.cfg.interval_ms * v as u64);
+            ui.radio_value(&mut n, v, format!("{v} 回(今の間隔で {span})"));
+        }
+    });
+    if n != st.cfg.graph_points {
+        st.cfg.graph_points = n;
+        changed = true;
+    }
+    desc(ui, &pal, GRAPH_TEXT);
+    head(ui, &pal, "プロセスの表");
+    changed |= choose(ui, &pal, "行のダブルクリック", &mut st.cfg.double_click, DoubleClick::ALL, DoubleClick::label);
+    changed |= choose(ui, &pal, "ツリーで新しく見えたプロセス", &mut st.cfg.tree_start, TreeStart::ALL, TreeStart::label);
+    desc(ui, &pal, "「全部畳む」では、新しく見えたプロセスを畳んだ状態で出します。今出ているプロセスは変わりません(次の起動から全部に効きます)。絞り込んでいる間は、一致した行が見えるように開いて出します。開いた・畳んだ状態は保存しません");
+    if changed {
+        st.save_config();
+    }
+}
+
+/// ミニ表示とトレイ(v0.4.0): ミニ表示に出す物、トレイのアイコンの値
+fn mini_tray(st: &mut State, ui: &mut Ui) {
+    let pal = theme::palette(ui);
+    head(ui, &pal, "ミニ表示に出す物");
+    let m = &mut st.cfg.mini_items;
+    let before = m.clone();
+    ui.horizontal_wrapped(|ui| {
+        for (v, label) in [(&mut m.cpu, "CPU"), (&mut m.mem, "メモリ"), (&mut m.gpu, "GPU"), (&mut m.disk, "ディスク"), (&mut m.net_recv, "受信"), (&mut m.net_send, "送信")] {
+            ui.checkbox(v, label);
+        }
+    });
+    ui.checkbox(&mut m.top_process, "CPU を一番使っているプロセス");
+    // 全部は消させない(最後の 1 つは戻す)
+    if !m.any_graph() && !m.top_process {
+        *m = before.clone();
+    }
+    if *m != before {
+        st.save_config();
+    }
+    desc(ui, &pal, "全部は外せません(最後の 1 つは残ります)。ミニ表示は Ctrl+M か、メニューの「表示 > ミニ表示」で切り替えます");
+    head(ui, &pal, "トレイのアイコン");
+    let mut v = st.cfg.tray_value;
+    ui.add_enabled_ui(st.cfg.tray_enabled, |ui| {
+        if choose(ui, &pal, "メーターに出す値", &mut v, TrayValue::ALL, TrayValue::label) {
+            st.cfg.tray_value = v;
+            st.save_config();
+        }
+    });
+    if !st.cfg.tray_enabled {
+        desc(ui, &pal, "トレイにアイコンを出すとき(「全般」)だけ選べます");
+    }
 }
 
 fn touch_free(st: &mut State, ui: &mut Ui) {

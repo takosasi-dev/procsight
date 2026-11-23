@@ -62,7 +62,7 @@ fn s3_s4() {
 
 #[test]
 fn s5_s8_windows() {
-    for p in [SPage::General, SPage::Look, SPage::TouchFree, SPage::Diagnostics] {
+    for p in SPage::ALL {
         shoot(&format!("s5-settings-{}", format!("{p:?}").to_lowercase()), BIG, || {
             let mut st = demo::state();
             st.settings.open = true;

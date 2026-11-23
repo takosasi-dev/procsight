@@ -307,3 +307,57 @@ fn ctrl_numbers_switch_tabs() {
         assert_eq!(h.state().tab, t);
     }
 }
+
+/// v0.4.0: 起動時のタブは start_tab、Last なら last_tab(既定はプロセス)
+#[test]
+fn start_tab_from_config() {
+    use procsight_core::config::{Config, StartTab};
+    let at = |start_tab, last_tab| State::new(demo::env(), Config { start_tab, last_tab, ..Config::default() }).tab;
+    assert_eq!(State::new(demo::env(), Config::default()).tab, Tab::Processes);
+    assert_eq!(at(StartTab::Services, StartTab::Startup), Tab::Services);
+    assert_eq!(at(StartTab::Last, StartTab::Startup), Tab::Startup);
+    assert_eq!(at(StartTab::Last, StartTab::Last), Tab::Processes, "壊れた値でもプロセスに落ちる");
+    for t in Tab::ALL {
+        assert_eq!(Tab::of_start(t.start_tab()), Some(t));
+    }
+}
+
+/// タブが変わったら last_tab に入れて保存する。変わらない間は保存しない(毎フレーム書かない)
+#[test]
+fn tab_change_saves_last_tab_once() {
+    use procsight_core::config::StartTab;
+    let mut h = harness(demo::state(), true, BIG);
+    h.run_steps(2);
+    assert!(!h.state().config_dirty, "既定のまま(プロセス)なら書かない");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num4);
+    h.run_steps(2);
+    assert_eq!(h.state().cfg.last_tab, StartTab::Services);
+    assert!(h.state().config_dirty);
+    h.state_mut().config_dirty = false;
+    h.run_steps(3);
+    assert!(!h.state().config_dirty, "同じタブの間は書かない");
+    // パレットなど、他の所から変わっても拾う
+    h.state_mut().tab = Tab::Performance;
+    h.run_steps(1);
+    assert_eq!(h.state().cfg.last_tab, StartTab::Performance);
+}
+
+/// 起動したときの窓がミニなら、最初のフレームで set_mini と同じ道でミニに入る(文字の大きさが 100% 以外でも)
+#[test]
+fn start_mode_mini_enters_mini_once() {
+    use procsight_core::config::{Config, StartMode};
+    for scale in [1.0, 1.6] {
+        let cfg = Config { start_mode: StartMode::Mini, font_scale: scale, ..Config::default() };
+        let mut h = harness(State::new(demo::env(), cfg), true, BIG);
+        h.run_steps(3);
+        assert!(h.state().mini, "文字の大きさ {scale}");
+        let n = h.state().actions.iter().filter(|a| **a == Action::SetMini(true)).count();
+        assert_eq!(n, 1, "入るのは 1 回だけ");
+    }
+    // 既定(普通の表示)とトレイでは入らない
+    for mode in [StartMode::Normal, StartMode::Tray] {
+        let mut h = harness(State::new(demo::env(), Config { start_mode: mode, ..Config::default() }), true, BIG);
+        h.run_steps(2);
+        assert!(!h.state().mini);
+    }
+}

@@ -38,6 +38,13 @@ impl<T> Ring<T> {
     pub fn capacity(&self) -> usize {
         self.cap
     }
+    /// 持つ回数を変える(v0.4.0 のグラフの長さ)。減らすときは古い方から捨てる
+    pub fn set_capacity(&mut self, cap: usize) {
+        self.cap = cap.max(1);
+        while self.items.len() > self.cap {
+            self.items.pop_front();
+        }
+    }
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &T> + ExactSizeIterator {
         self.items.iter()
     }
@@ -61,5 +68,17 @@ mod tests {
         assert_eq!(r.last(), Some(&99));
         r.clear();
         assert!(r.is_empty());
+    }
+
+    #[test]
+    fn set_capacity_keeps_the_newest() {
+        let mut r = Ring::new(5);
+        (0..5).for_each(|i| r.push(i));
+        r.set_capacity(3);
+        assert_eq!(r.iter().copied().collect::<Vec<_>>(), vec![2, 3, 4]);
+        r.set_capacity(300);
+        (5..10).for_each(|i| r.push(i));
+        assert_eq!(r.len(), 8);
+        assert_eq!(r.capacity(), 300);
     }
 }

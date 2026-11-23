@@ -1,13 +1,15 @@
-//! ミニ表示(v0.3.0): CPU・メモリ・GPU・ディスク・ネットの今の値と小さなグラフ、CPU の上位 1 つだけの小さな窓。
+//! ミニ表示(v0.3.0): CPU・メモリ・GPU・ディスク・ネットの今の値と小さなグラフ、CPU の上位 1 つだけの小さな窓(v0.4.0: 出す行は cfg.mini_items)。
 //! 窓の大きさ・常に手前の切り替えは window_commands(純粋な関数)で決め、shell.rs が egui に渡すだけ。
 //! 確認の窓・ボタン付きの帯・パレットが出たら普通の表示に戻す(should_leave)。ミニ表示は保存しない。
 
 use crate::app::State;
+use crate::perf::Series;
 use crate::theme::{self, Palette, size, space};
 use eframe::egui;
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, ViewportCommand, WindowLevel};
+use procsight_core::config::{MiniItems, SpeedUnit};
 use procsight_core::format;
-use procsight_core::ring::{GRAPH_POINTS, Ring};
+use procsight_core::ring::Ring;
 use procsight_core::{PerfSample, ProcState};
 
 /// ミニ表示に入ったときの大きさ(点。文字の大きさを変えても中の並びは同じ)
@@ -93,13 +95,13 @@ fn touch_free_running(st: &State) -> usize {
     st.snap.rows.iter().filter(|r| r.state == ProcState::TouchFree && r.is_gone == 0).count()
 }
 
-/// いくつかのリングを右(今)にそろえて 1 本にまとめる(f で合わせる)。確保しないよう固定の長さの配列で
-fn combine<'a>(rings: impl Iterator<Item = &'a Ring<f32>>, f: fn(f32, f32) -> f32) -> ([f32; GRAPH_POINTS], usize) {
-    let mut buf = [f32::NAN; GRAPH_POINTS];
+/// いくつかのリングを右(今)にそろえて、長さ points の 1 本にまとめる(f で合わせる)。返すのは (値, 埋まった数)。埋まっていない左側は NaN
+fn combine<'a>(rings: impl Iterator<Item = &'a Ring<f32>>, points: usize, f: fn(f32, f32) -> f32) -> (Vec<f32>, usize) {
+    let mut buf = vec![f32::NAN; points];
     let mut n = 0;
     for r in rings {
-        for (j, v) in r.iter().rev().take(GRAPH_POINTS).enumerate() {
-            let slot = &mut buf[GRAPH_POINTS - 1 - j];
+        for (j, v) in r.iter().rev().take(points).enumerate() {
+            let slot = &mut buf[points - 1 - j];
             let v = if v.is_finite() { *v } else { 0.0 };
             *slot = if slot.is_nan() { v } else { f(*slot, v) };
             n = n.max(j + 1);
@@ -113,64 +115,72 @@ struct Row {
     name: &'static str,
     value: String,
     hover: String,
-    /// 線(右が今)と上端の値。None は取れない(枠だけ描く)
-    line: Option<([f32; GRAPH_POINTS], usize, f32)>,
+    /// 線(右が今。長さは点の数)と埋まった数と上端の値。None は取れない(枠だけ描く)
+    line: Option<(Vec<f32>, usize, f32)>,
     color: Color32,
     /// 値を警告の色にする(90% 以上)
     hot: bool,
 }
 
-fn pct_row(name: &'static str, now: Option<f32>, line: ([f32; GRAPH_POINTS], usize), hover: String, color: Color32) -> Row {
+fn pct_row(name: &'static str, now: Option<f32>, line: (Vec<f32>, usize), hover: String, color: Color32) -> Row {
     match now {
         Some(v) => Row { name, value: format!("{v:.0}%"), hover, line: Some((line.0, line.1, 100.0)), color, hot: v >= 90.0 },
         None => Row { name, value: format::DASH.into(), hover, line: None, color, hot: false },
     }
 }
 
+/// 出す行だけを作る(cfg.mini_items。並びは CPU・メモリ・GPU・ディスク・受信・送信のまま)
 fn rows(st: &State, pal: &Palette) -> Vec<Row> {
     let pv = &st.perf;
     let p: &PerfSample = &pv.last;
-    let one = |r: &Ring<f32>| combine(std::iter::once(r), f32::max);
+    let show: &MiniItems = &st.cfg.mini_items;
+    let points = pv.points();
+    let one = |r: &Ring<f32>| combine(std::iter::once(r), points, f32::max);
     let mut out = Vec::with_capacity(6);
-    out.push(pct_row("CPU", p.cpu_total, one(&pv.cpu), "CPU 全体の使用率".into(), pal.graph));
-    out.push(match &p.mem {
-        Some(m) => {
-            let hover = format!("使用中 {} / {}", format::bytes(m.in_use()), format::bytes(m.total));
-            let (buf, n) = one(&pv.mem);
-            let pct = m.used_pct();
-            let value = pct.map_or_else(|| format::DASH.to_string(), |v| format!("{v:.0}%"));
-            Row { name: "メモリ", value, hover, line: Some((buf, n, (m.total as f32).max(1.0))), color: pal.graph, hot: pct.is_some_and(|v| v >= 90.0) }
-        }
-        None => Row { name: "メモリ", value: format::DASH.into(), hover: "取得できません".into(), line: None, color: pal.graph, hot: false },
-    });
-    let gpu_now = p.gpus.as_ref().and_then(|g| g.iter().map(|g| g.util_pct).reduce(f32::max));
-    let gpu_hover = match p.gpus.as_deref() {
-        Some([g]) => g.name.clone(),
-        Some(gs) if !gs.is_empty() => format!("{} 個の GPU のうち一番高い値", gs.len()),
-        _ => "取得できません".into(),
-    };
-    out.push(pct_row("GPU", gpu_now, combine(pv.gpus.values().map(|s| &s.a), f32::max), gpu_hover, pal.graph));
-    let busiest = p.disks.as_ref().and_then(|d| d.iter().max_by(|a, b| a.active_pct.total_cmp(&b.active_pct)));
-    let disk_hover = busiest.map_or_else(|| "取得できません".into(), |d| format!("一番忙しいディスク: {}(アクティブな時間)", d.name));
-    out.push(pct_row("ディスク", busiest.map(|d| d.active_pct), combine(pv.disks.values().map(|s| &s.a), f32::max), disk_hover, pal.graph));
+    if show.cpu {
+        out.push(pct_row("CPU", p.cpu_total, one(&pv.cpu), "CPU 全体の使用率".into(), pal.graph));
+    }
+    if show.mem {
+        out.push(match &p.mem {
+            Some(m) => {
+                let hover = format!("使用中 {} / {}", format::bytes(m.in_use()), format::bytes(m.total));
+                let (buf, n) = one(&pv.mem);
+                let pct = m.used_pct();
+                let value = pct.map_or_else(|| format::DASH.to_string(), |v| format!("{v:.0}%"));
+                Row { name: "メモリ", value, hover, line: Some((buf, n, (m.total as f32).max(1.0))), color: pal.graph, hot: pct.is_some_and(|v| v >= 90.0) }
+            }
+            None => Row { name: "メモリ", value: format::DASH.into(), hover: "取得できません".into(), line: None, color: pal.graph, hot: false },
+        });
+    }
+    if show.gpu {
+        let gpu_now = p.gpus.as_ref().and_then(|g| g.iter().map(|g| g.util_pct).reduce(f32::max));
+        let gpu_hover = match p.gpus.as_deref() {
+            Some([g]) => g.name.clone(),
+            Some(gs) if !gs.is_empty() => format!("{} 個の GPU のうち一番高い値", gs.len()),
+            _ => "取得できません".into(),
+        };
+        out.push(pct_row("GPU", gpu_now, combine(pv.gpus.values().map(|s| &s.a), points, f32::max), gpu_hover, pal.graph));
+    }
+    if show.disk {
+        let busiest = p.disks.as_ref().and_then(|d| d.iter().max_by(|a, b| a.active_pct.total_cmp(&b.active_pct)));
+        let disk_hover = busiest.map_or_else(|| "取得できません".into(), |d| format!("一番忙しいディスク: {}(アクティブな時間)", d.name));
+        out.push(pct_row("ディスク", busiest.map(|d| d.active_pct), combine(pv.disks.values().map(|s| &s.a), points, f32::max), disk_hover, pal.graph));
+    }
     // ネットは全部のアダプターの合計。上端は線ごとに見えている最大(送信は受信より小さいことが多く、同じ上端では平らに見える)
     let nets = p.nets.as_ref().filter(|n| !n.is_empty());
-    let recv = combine(pv.nets.values().map(|s| &s.b), |a, b| a + b);
-    let send = combine(pv.nets.values().map(|s| &s.a), |a, b| a + b);
-    let net_max = |l: &([f32; GRAPH_POINTS], usize)| (l.0.iter().copied().filter(|v| v.is_finite()).fold(0.0, f32::max) * 1.1).max(1024.0);
+    let net_max = |l: &[f32]| (l.iter().copied().filter(|v| v.is_finite()).fold(0.0, f32::max) * 1.1).max(1024.0);
     let net_hover = nets.map_or_else(|| "取得できません".into(), |n| format!("ネットワーク {} 個の合計", n.len()));
-    for (name, now, line, color) in [
-        ("受信", nets.map(|n| n.iter().map(|x| x.recv_bps).sum::<f64>()), recv, pal.graph),
-        ("送信", nets.map(|n| n.iter().map(|x| x.send_bps).sum::<f64>()), send, pal.graph2),
+    type Pick = fn(&Series) -> &Ring<f32>;
+    for (on, name, now, pick, color) in [
+        (show.net_recv, "受信", nets.map(|n| n.iter().map(|x| x.recv_bps).sum::<f64>()), (|s| &s.b) as Pick, pal.graph),
+        (show.net_send, "送信", nets.map(|n| n.iter().map(|x| x.send_bps).sum::<f64>()), (|s| &s.a) as Pick, pal.graph2),
     ] {
-        out.push(Row {
-            name,
-            value: format::speed(now),
-            hover: net_hover.clone(),
-            line: now.map(|_| (line.0, line.1, net_max(&line))),
-            color,
-            hot: false,
-        });
+        if !on {
+            continue;
+        }
+        let (buf, n) = combine(pv.nets.values().map(pick), points, |a, b| a + b);
+        let max = net_max(&buf);
+        out.push(Row { name, value: format::speed(now), hover: net_hover.clone(), line: now.map(|_| (buf, n, max)), color, hot: false });
     }
     out
 }
@@ -194,12 +204,13 @@ fn cols(ui: &Ui, width: f32) -> Cols {
     let body = FontId::proportional(size::BODY);
     let w = |s: &str| ui.painter().layout_no_wrap(s.to_string(), body.clone(), Color32::WHITE).size().x;
     let name_w = ["CPU", "メモリ", "GPU", "ディスク", "受信", "送信", "上位"].iter().map(|s| w(s)).fold(0.0, f32::max);
-    let value_w = w("999.9 KB/s");
+    // 値の一番長い形(ビットのときは「Mbps」が「KB/s」より広い)
+    let value_w = w(if format::speed_unit() == SpeedUnit::Bits { "999.9 Mbps" } else { "999.9 KB/s" });
     let rest = width - name_w - value_w - space::M * 2.0;
     Cols { name_w, value_w, spark_w: if rest >= 40.0 { rest } else { 0.0 } }
 }
 
-fn metric_row(ui: &mut Ui, pal: &Palette, c: &Cols, row_h: f32, r: &Row) {
+fn metric_row(ui: &mut Ui, pal: &Palette, c: &Cols, row_h: f32, points: usize, r: &Row) {
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, row_h), Sense::hover());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("{} {}", r.name, r.value)));
@@ -215,13 +226,20 @@ fn metric_row(ui: &mut Ui, pal: &Palette, c: &Cols, row_h: f32, r: &Row) {
         if c.spark_w > 0.0 {
             let sh = (row_h - 6.0).max(10.0);
             let sr = Rect::from_min_size(Pos2::new(rect.right() - c.spark_w, y - sh / 2.0), Vec2::new(c.spark_w, sh));
-            let (buf, n, max) = r.line.unwrap_or(([0.0; GRAPH_POINTS], 0, 1.0));
+            // 取れない行は枠だけ(値の無い線)
+            let (vals, max): (&[f32], f32) = r.line.as_ref().map_or((&[], 1.0), |(buf, n, max)| (&buf[buf.len() - n..], *max));
             ui.scope_builder(UiBuilder::new().max_rect(sr), |ui| {
-                crate::perf::sparkline(ui, buf[GRAPH_POINTS - n..].iter().copied(), max, sr.size(), r.color);
+                crate::perf::sparkline_in(ui, vals.iter().copied(), points, max, sr.size(), r.color);
             });
         }
     }
     resp.on_hover_text(&r.hover);
+}
+
+/// 上位の行の % の文字。CPU の数え方(コアごとなら論理プロセッサの数)を掛ける。並びは掛ける前の値のまま
+fn top_value_text(st: &State) -> String {
+    let factor = f64::from(st.cfg.cpu_factor(st.snap.logical_cpus));
+    st.perf.tops.cpu.first().map_or_else(|| format::DASH.to_string(), |t| format!("{:.0}%", t.value * factor))
 }
 
 /// CPU を一番使っているプロセス(PID 0 と終わった行は perf の上位で除いてある)。押すと普通の表示のその行へ
@@ -241,7 +259,7 @@ fn top_row(st: &mut State, ui: &mut Ui, pal: &Palette, c: &Cols, row_h: f32) {
         let name = galley(ui, "上位", body.clone(), pal.weak, c.name_w + 1.0);
         ui.painter().galley(Pos2::new(rect.left(), y - name.size().y / 2.0), name, pal.weak);
         let text = ui.visuals().strong_text_color();
-        let value = top.as_ref().map_or_else(|| format::DASH.to_string(), |t| format!("{:.0}%", t.value));
+        let value = top_value_text(st);
         let vg = galley(ui, &value, body.clone(), text, c.value_w);
         let vx = rect.left() + c.name_w + space::M + c.value_w - vg.size().x;
         ui.painter().galley(Pos2::new(vx, y - vg.size().y / 2.0), vg, text);
@@ -307,25 +325,36 @@ pub fn ui(st: &mut State, ui: &mut Ui) {
         ui.ctx().request_repaint();
     }
     let pal = theme::palette(ui);
+    // グラフの長さ(普通の表示の perf::ui と同じ輪を使う。ミニの間は perf::ui が走らないので、ここでも合わせる)
+    let points = st.cfg.graph_points;
+    st.perf.set_points(points);
     let rows = rows(st, &pal);
+    let show_top = st.cfg.mini_items.top_process;
     let text_h = ui.text_style_height(&egui::TextStyle::Body);
     let foot_h = (text_h + ui.spacing().button_padding.y * 2.0).max(ui.spacing().interact_size.y);
     let body_h = (ui.available_height() - foot_h - space::S).max(0.0);
-    // 上の区切りの線と間の分
-    let sep_h = space::S + 1.0 + space::XS;
-    // 縦に余れば行を高く(線が見やすい)、足りなければ文字の高さまで詰めて、それでも入らなければ縦に送る
-    let row_h = ((body_h - sep_h) / (rows.len() as f32 + 1.0)).clamp(text_h + 4.0, 36.0).floor();
+    // 区切りの線はグラフの行と上位の両方があるときだけ。その線と間の分
+    let sep = show_top && !rows.is_empty();
+    let sep_h = if sep { space::S + 1.0 + space::XS } else { 0.0 };
+    let n_rows = rows.len() + usize::from(show_top);
+    // 縦に余れば行を高く(線が見やすい)、足りなければ文字の高さまで詰めて、それでも入らなければ縦に送る。
+    // 行が少なくても 36 より高くしない(行が間延びしない)。残りは下の列の上の空きになる
+    let row_h = ((body_h - sep_h) / n_rows.max(1) as f32).clamp(text_h + 4.0, 36.0).floor();
     let c = cols(ui, ui.available_width() - space::S);
     let body = egui::ScrollArea::vertical().max_height(body_h).auto_shrink([false, false]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for r in &rows {
-            metric_row(ui, &pal, &c, row_h, r);
+            metric_row(ui, &pal, &c, row_h, points, r);
         }
-        ui.add_space(space::S);
-        let (line, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
-        ui.painter().hline(line.x_range(), line.center().y, Stroke::new(1.0, pal.border));
-        ui.add_space(space::XS);
-        top_row(st, ui, &pal, &c, row_h);
+        if sep {
+            ui.add_space(space::S);
+            let (line, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+            ui.painter().hline(line.x_range(), line.center().y, Stroke::new(1.0, pal.border));
+            ui.add_space(space::XS);
+        }
+        if show_top {
+            top_row(st, ui, &pal, &c, row_h);
+        }
     });
     // 値と線の上(下の列のボタンを除く)をダブルクリックで戻る。行は押せない部品なので、入力で見る
     let dbl = ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary) && i.pointer.interact_pos().is_some_and(|p| body.inner_rect.contains(p)));
@@ -334,4 +363,26 @@ pub fn ui(st: &mut State, ui: &mut Ui) {
     }
     ui.add_space(space::S);
     ui.allocate_ui(Vec2::new(ui.available_width(), foot_h), |ui| footer(st, ui, &pal));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use procsight_core::config::CpuScale;
+
+    /// コアごとの数え方: 上位のプロセスの % は論理プロセッサの数を掛け、全体の CPU の行は掛けない。並びは変えない
+    #[test]
+    fn per_core_scales_only_the_top_process() {
+        let mut st = crate::demo::state();
+        let top = st.perf.tops.cpu[0].clone();
+        assert_eq!(top_value_text(&st), format!("{:.0}%", top.value), "既定は掛けない");
+        let pal = theme::palette_for(true, st.cfg.accent);
+        let cpu_row = |st: &State| rows(st, &pal).into_iter().find(|r| r.name == "CPU").map(|r| r.value).unwrap();
+        let total_before = cpu_row(&st);
+        st.cfg.cpu_scale = CpuScale::PerCore;
+        assert_eq!(st.snap.logical_cpus, 8);
+        assert_eq!(top_value_text(&st), format!("{:.0}%", top.value * 8.0));
+        assert_eq!(cpu_row(&st), total_before, "全体の CPU は掛けない");
+        assert_eq!(st.perf.tops.cpu[0].id, top.id, "並びは変えない");
+    }
 }
