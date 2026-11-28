@@ -146,3 +146,9 @@ v0.4.0 はプレリリースです。自動のテスト(245 件ほど)と、標�
 ## ライセンス
 
 MIT License([LICENSE](LICENSE))。依存する crate のライセンスは [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) にあります。日本語の文字は Windows に入っているフォント(Yu Gothic UI など)を使い、フォントは同梱していません。
+
+<!-- takosasi-dev line: the sign and the links follow https://github.com/takosasi-dev/takosasi-dev -->
+<p align="center">
+<a href="https://github.com/takosasi-dev"><img src="https://raw.githubusercontent.com/takosasi-dev/takosasi-dev/main/assets/stations/procsight.svg" width="640" alt="たこさし線の駅名標(作者のほかの制作物へ)"></a><br>
+<a href="https://takosasi-dev.github.io/takosasi-dev/line/?from=procsight&amp;go=prev">◀ 前の駅</a> ・ <a href="https://github.com/takosasi-dev">路線図</a> ・ <a href="https://takosasi-dev.github.io/takosasi-dev/line/?from=procsight&amp;go=next">次の駅 ▶</a>
+</p>
